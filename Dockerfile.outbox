@@ -1,9 +1,10 @@
-FROM node:22-alpine
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
 WORKDIR /app
 ENV NODE_ENV=production SERVICE_NAME=modernize-outbox
 RUN addgroup --system --gid 1001 modernize && adduser --system --uid 1001 worker
 COPY package.json package-lock.json ./
-RUN npm ci --include=dev && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force \
+	&& rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY tsconfig.json ./
 COPY src ./src
 COPY worker ./worker

@@ -13,6 +13,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: web
@@ -44,3 +45,10 @@ jobs:
         if: always()
         with:
           sarif_file: trivy-${{ matrix.name }}.sarif
+          category: container-${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-${{ matrix.name }}
+          path: trivy-${{ matrix.name }}.sarif
+          if-no-files-found: error
