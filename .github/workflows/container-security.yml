@@ -31,8 +31,9 @@ jobs:
           load: true
           push: false
           tags: modernize-ai/${{ matrix.name }}:${{ github.sha }}
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
+          version: v0.70.0
           image-ref: modernize-ai/${{ matrix.name }}:${{ github.sha }}
           format: sarif
           output: trivy-${{ matrix.name }}.sarif
