@@ -31,9 +31,10 @@ incidents, perform load/soak testing, and complete the independent approval and
 authenticated repository canary gates. Do not describe a passing build or a
 draft PR as completion of these requirements.
 
-The local environment used for this acceptance did not provide CodeQL, Trivy or
-Docker executables. Dependency audit returned no production-dependency findings;
-it is not a substitute for SAST, image scanning or adversarial sandbox testing.
+The initial local acceptance did not provide CodeQL, Trivy or Docker executables.
+GitHub Actions subsequently supplied CodeQL and application-container scan evidence
+for the application release below. Dependency audit is not a substitute for those
+checks or for adversarial sandbox testing.
 No production qualification or independent environment approval is implied by a
 manual update to the existing pilot.
 
@@ -48,6 +49,29 @@ so the zero-dead-letter production gate has not passed despite healthy endpoints
 The authenticated dashboard and empty-repository wizard were checked after a page
 reload. No new repository canary or publication approval was performed for this
 release, and `gpt-6-astra` remains configured.
+
+### Application Update, 2026-09-23
+
+The application update is scoped to refactoring functionality and the existing
+Azure deployment. Backup/DR expansion and a new canary repository were excluded
+by the operator; they are not prerequisites for this pilot update or passed gates.
+
+Commit `84d3a68` passed Quality gates, CodeQL and all three Container security
+jobs in GitHub Actions. Trivy and its action are pinned; individual scans no longer
+cancel one another and retain separate SARIF reports. Application base images use
+immutable digests, runtime npm/Yarn tooling is removed, workers omit development
+dependencies, and `tsx` remains an explicit production dependency. The complete
+dependency audit returned zero vulnerabilities after updating `js-yaml`.
+
+The final local suite passed 108 tests and the production build. Verifier
+infrastructure and dispatch now use the same immutable image. A fresh Foundry
+full-app fixture passed all eight baseline/candidate commands in Azure job
+`modernize-isolated-verifier-3u3r7u8`: one original baseline HTTP test and 61
+candidate tests passed without skips. This is fixture acceptance, not a claim
+that every legacy application or external integration has been verified.
+
+The five inspected dead-letter messages are September 5 failed attempts for the
+subsequently published wealth run. They were not replayed or silently discarded.
 
 ## Release gates
 

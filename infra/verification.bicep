@@ -18,7 +18,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
     template: {
       containers: [{
         name: 'runner'
-        image: 'node:22-bookworm-slim'
+        image: 'node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9'
         command: ['node', '-e', 'console.log("An explicit scoped verification request is required")']
         resources: { cpu: 2, memory: '4Gi' }
       }]
