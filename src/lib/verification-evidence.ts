@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { auditFindingsRecorded, ecosystemAuditCommands, ecosystemUnits, ecosystemVerificationCommands } from "./verification-ecosystems";
 
 export const verificationReportSchema = z.object({
   status:z.enum(["passed","failed","unsupported"]),
@@ -30,6 +31,7 @@ export function expectedVerificationProjects(files:Array<{path:string;content:st
     if(file.path==="requirements.txt"||file.path.endsWith("/requirements.txt"))projects.push({project:file.path==="requirements.txt"?".":file.path.slice(0,-17),commands:[...pythonVerificationCommands,...(files.some(candidate=>candidate.path===file.path.replace(/requirements\.txt$/,"requirements-dev.txt"))?[pythonTestDependenciesCommand]:[])]});
     if(file.path==="package.json"||!workspaces&&file.path.endsWith("/package.json"))projects.push({project:file.path==="package.json"?".":file.path.slice(0,-13),commands:npmVerificationCommands});
   }
+  for(const unit of ecosystemUnits(files.map(file=>file.path)))projects.push({project:unit.project,commands:ecosystemVerificationCommands[unit.runtime]});
   return projects;
 }
 
@@ -54,7 +56,7 @@ export function reportPassed(report:VerificationReport) {
     if(!projects.size)return false;
     for(const project of projects){
       const steps=report.steps.filter(step=>step.variant===variant&&step.project===project);
-      const profiles=[npmVerificationCommands,pythonVerificationCommands].filter(commands=>steps.some(step=>commands.includes(step.command)));
+      const profiles=[npmVerificationCommands,pythonVerificationCommands,...Object.values(ecosystemVerificationCommands)].filter(commands=>steps.some(step=>commands.includes(step.command)));
       if(!profiles.length||steps.some(step=>!profiles.some(commands=>commands.includes(step.command)||commands===pythonVerificationCommands&&step.command===pythonTestDependenciesCommand)))return false;
       for(const commands of profiles)for(const command of commands)if(!steps.some(step=>step.command===command))return false;
     }
@@ -69,6 +71,7 @@ export function safeSnapshotPath(path:string) {
 export function verificationStepAcceptable(step:VerificationReport["steps"][number]) {
   if(step.timedOut)return false;
   if(step.exitCode===0)return true;
+  if(step.variant==="baseline"&&ecosystemAuditCommands.has(step.command)&&step.exitCode===1)return auditFindingsRecorded(step.log);
   if(step.variant==="baseline"&&step.command===pythonVerificationCommands[4]&&step.exitCode===1){
     try{
       const audit=z.object({dependencies:z.array(z.object({name:z.string(),version:z.string(),skip_reason:z.string().optional(),vulns:z.array(z.object({id:z.string().min(1)}))})).min(1)}).parse(JSON.parse(step.log.slice(step.log.indexOf('{'))));

@@ -11,7 +11,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
     environmentId: environmentId
     configuration: {
       triggerType: 'Manual'
-      replicaTimeout: 1800
+      replicaTimeout: 3600
       replicaRetryLimit: 0
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
     }

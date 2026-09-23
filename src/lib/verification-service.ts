@@ -37,7 +37,7 @@ export async function prepareVerification(runId:string,tenantId:string) {
     await client.query("UPDATE verification_jobs SET status='failed',error='Verification deadline exceeded',snapshot=NULL WHERE run_id=$1 AND status IN ('preparing','running') AND expires_at<now()",[runId]);
     const existing=await client.query("SELECT 1 FROM verification_jobs WHERE run_id=$1 AND status IN ('preparing','running')",[runId]);
     if(existing.rowCount)throw new Error("Verification is already in progress.");
-    await client.query("INSERT INTO verification_jobs(id,run_id,tenant_id,source_sha,changeset_digest,token_hash) VALUES($1,$2,$3,$4,$5,$6)",[id,runId,tenantId,run.source_commit_sha,changesetDigest(run.source_commit_sha,changes),createHash("sha256").update(token).digest("hex")]);
+    await client.query("INSERT INTO verification_jobs(id,run_id,tenant_id,source_sha,changeset_digest,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '75 minutes')",[id,runId,tenantId,run.source_commit_sha,changesetDigest(run.source_commit_sha,changes),createHash("sha256").update(token).digest("hex")]);
     return {...run,changes};
   });
   return {id,token,...record};
@@ -66,7 +66,7 @@ export async function dispatchVerification(prepared:Awaited<ReturnType<typeof pr
     const candidate=applyVerificationChanges(source,prepared.changes);
     const baseline=applyBaselineTestHarness(source,candidate);
     const baselinePreparationPaths=baseline.filter(file=>/(^|\/)package\.json$/.test(file.path)&&source.find(original=>original.path===file.path)?.content!==file.content).map(file=>file.path.replace(/package\.json$/,"package-lock.json"));
-    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,sourceLockfiles:source.filter(file=>/(^|\/)package-lock\.json$/.test(file.path))})]);
+    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,sourceLockfiles:source.filter(file=>/(^|\/)(package-lock\.json|go\.mod|go\.sum|composer\.lock)$/.test(file.path))})]);
     if(!claimed.rowCount)return;
     const credential=new ManagedIdentityCredential();
     const access=await credential.getToken("https://management.azure.com/.default");

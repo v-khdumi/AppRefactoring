@@ -1,6 +1,37 @@
 import { safeSnapshotPath } from "./verification-evidence";
+import { ecosystemUnits, isDotnetTestProject, dotnetProject } from "./verification-ecosystems";
 
 type SnapshotFile={path:string;content:string;executable:boolean};
+const directoryOf=(path:string)=>path.includes("/")?path.slice(0,path.lastIndexOf("/")):".";
+const withinUnit=(project:string,path:string)=>project==="."||path.startsWith(`${project}/`);
+function additiveEcosystemTests(files:Map<string,SnapshotFile>,baseline:SnapshotFile[],candidate:SnapshotFile[]){
+  const original=new Set(baseline.map(file=>file.path));
+  const originalDirectories=new Set(baseline.map(file=>directoryOf(file.path)));
+  const add=(file:SnapshotFile)=>{
+    if(!safeSnapshotPath(file.path))throw new Error("Unsafe baseline test path.");
+    if(files.has(file.path)){if(files.get(file.path)!.content!==file.content)throw new Error(`Baseline harness cannot overwrite existing test: ${file.path}`);return;}
+    files.set(file.path,file);
+  };
+  const additions=candidate.filter(file=>!original.has(file.path));
+  const characterization=(path:string)=>/characteri[sz]ation/i.test(path);
+  for(const unit of ecosystemUnits(baseline.map(file=>file.path))){
+    const scoped=additions.filter(file=>withinUnit(unit.project,file.path));
+    if(unit.runtime==="maven"||unit.runtime==="gradle")scoped.filter(file=>/(^|\/)src\/test\//.test(file.path)&&characterization(file.path)).forEach(add);
+    if(unit.runtime==="go")scoped.filter(file=>file.path.endsWith("_test.go")&&characterization(file.path)&&originalDirectories.has(directoryOf(file.path))).forEach(add);
+    if(unit.runtime==="php"){
+      let composer:{"require-dev"?:Record<string,string>}={};
+      try{composer=JSON.parse(Buffer.from(baseline.find(file=>file.path===(unit.project==="."?"composer.json":`${unit.project}/composer.json`))?.content||"","base64").toString("utf8"));}catch{}
+      if(Object.keys(composer["require-dev"]||{}).some(name=>/^(phpunit\/phpunit|pestphp\/pest)$/i.test(name)))scoped.filter(file=>/(^|\/)tests?\//i.test(file.path)&&characterization(file.path)||/(^|\/)phpunit\.xml(\.dist)?$/.test(file.path)).forEach(add);
+    }
+    if(unit.runtime==="dotnet"){
+      for(const project of additions.filter(file=>dotnetProject.test(file.path)&&isDotnetTestProject(Buffer.from(file.content,"base64").toString("utf8")))){
+        const directory=directoryOf(project.path);
+        if(directory==="."||originalDirectories.has(directory)||!characterization(directory))continue;
+        additions.filter(file=>file.path.startsWith(`${directory}/`)).forEach(add);
+      }
+    }
+  }
+}
 const testTools=new Set(["vitest","jsdom","@testing-library/react","@testing-library/dom","@testing-library/user-event","@testing-library/jest-dom"]);
 function automaticHarness(baseline:SnapshotFile[],candidate:SnapshotFile[]){
   const files=new Map(baseline.map(file=>[file.path,file]));
@@ -37,6 +68,7 @@ function automaticHarness(baseline:SnapshotFile[],candidate:SnapshotFile[]){
     copyTests(original.path.slice(0,-"package.json".length));
     files.set(original.path,{...original,content:Buffer.from(JSON.stringify(manifest)).toString("base64")});
   }
+  additiveEcosystemTests(files,baseline,candidate);
   return [...files.values()];
 }
 export function applyBaselineTestHarness(baseline:SnapshotFile[],candidate:SnapshotFile[]) {

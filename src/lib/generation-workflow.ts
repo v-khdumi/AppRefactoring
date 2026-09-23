@@ -4,6 +4,7 @@ import {validateGeneratedPlan} from "./transformation-engine";
 import {assertAgentChangeAreas,assertModernizationScope,AgentOwnershipError} from "./agent-policy";
 import {coordinationContractSchema,coordinationContractPath,type CoordinationContract} from "./coordination-contract";
 import {dependencyLock} from "./repository-evidence";
+import {isImmutableOriginalTest} from "./verification-ecosystems";
 
 export type SourceFile={path:string;content:string};
 export type GeneratedChange=GeneratedPlan["changes"][number];
@@ -61,7 +62,13 @@ export async function coordinatedGeneration(input:{
       if(change.path===coordinationContractPath||change.oldPath===coordinationContractPath)throw new AgentOwnershipError("The shared coordination contract is immutable during implementation.");
       if(dependencyLock.test(change.path)||change.oldPath&&dependencyLock.test(change.oldPath))throw new AgentOwnershipError(`Dependency lockfiles must be prepared by the isolated package manager, not model output: ${change.path}`);
       const previousOwner=owners.get(change.path)||change.oldPath&&owners.get(change.oldPath);
-      if(original.has(change.path)&&/(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[^/]+$/.test(change.path)&&(change.status!=="modified"||change.after!==original.get(change.path)))throw new AgentOwnershipError(`Original tests must remain unchanged; add explicit regression coverage instead: ${change.path}`);
+      if(original.has(change.path)&&isImmutableOriginalTest(change.path)&&(change.status!=="modified"||change.after!==original.get(change.path)))throw new AgentOwnershipError(`Original tests must remain unchanged; add explicit regression coverage instead: ${change.path}`);
+      if(agent==="testing"&&change.area==="platform"&&/(^|\/)composer\.json$/.test(change.path)){
+        const before=candidate.get(change.path);
+        if(!before||change.status==="deleted")throw new AgentOwnershipError("Testing Agent must wire an existing Composer project, not create or remove a runtime project.");
+        const runtime=(manifest:Record<string,unknown>)=>JSON.stringify(Object.fromEntries(Object.entries(manifest).filter(([key])=>!["require-dev","autoload-dev","scripts"].includes(key)).sort(([first],[second])=>first.localeCompare(second))));
+        if(runtime(JSON.parse(before))!==runtime(JSON.parse(change.after)))throw new AgentOwnershipError(`Testing Agent cannot replace runtime Composer fields: ${change.path}`);
+      }
       if(agent==="testing"&&change.area==="platform"&&/(^|\/)package\.json$/.test(change.path)){
         const before=candidate.get(change.path);
         if(!before||change.status==="deleted")throw new AgentOwnershipError("Testing Agent must wire an existing project manifest, not create or remove a runtime project.");
@@ -70,7 +77,7 @@ export async function coordinatedGeneration(input:{
         if(runtime(previous)!==runtime(proposed))throw new AgentOwnershipError(`Testing Agent cannot replace runtime manifest fields: ${change.path}`);
         for(const [name,value] of Object.entries(previous.scripts||{}))if(!['test','build'].includes(name)&&proposed.scripts?.[name]!==value)throw new AgentOwnershipError(`Testing Agent cannot replace unrelated script ${name}.`);
       }
-      const testConfiguration=/(^|\/)(package\.json|requirements(?:-dev)?\.txt|pyproject\.toml|vitest\.config\.[^/]+|pytest\.ini|tests\/)/.test(change.path);
+      const testConfiguration=/(^|\/)(package\.json|requirements(?:-dev)?\.txt|pyproject\.toml|vitest\.config\.[^/]+|pytest\.ini|tests?\/|pom\.xml|(?:build|settings)\.gradle(?:\.kts)?|go\.mod|composer\.json|phpunit\.xml(?:\.dist)?|[^/]+\.(?:sln|slnx)|src\/test\/)|_test\.go$|(^|\/)[^/]*\.(?:Unit|Integration)?Tests?\//.test(change.path);
       if(previousOwner&&previousOwner!==agent&&agent!=="security"&&!(agent==="testing"&&testConfiguration))throw new AgentOwnershipError(`${agent} cannot overwrite the ${previousOwner} proposal at ${change.path}.`);
       if(change.status==="renamed")throw new AgentOwnershipError("Coordinated generation requires explicit added/deleted changes for renames to preserve source-bound diffs.");
       const before=original.get(change.path);

@@ -3,10 +3,11 @@ import test from "node:test";
 import {verificationReadiness,readVerificationReadiness} from "../src/lib/verification-readiness";
 
 test("unsupported source and target stacks are rejected before generation",()=>{
-  const source=verificationReadiness([{path:"Backend/App.csproj"},{path:"frontend/package.json",content:'{"scripts":{"build":"vite build","test":"vitest"}}'},{path:"frontend/package-lock.json"}],{scope:"frontend"});
+  const source=verificationReadiness([{path:"native/Cargo.toml"},{path:"frontend/package.json",content:'{"scripts":{"build":"vite build","test":"vitest"}}'},{path:"frontend/package-lock.json"}],{scope:"frontend"});
   assert.equal(source.supported,false);
   assert.ok(source.blockers.some(item=>item.code==="UnsupportedRuntime"));
   assert.equal(verificationReadiness([{path:"requirements.txt",content:"fastapi==0.115.0"}],{scope:"backend",backendTarget:".NET 9 Minimal APIs"}).supported,false);
+  assert.equal(verificationReadiness([{path:"Backend/App.csproj"}],{scope:"backend"}).blockers[0].code,"ManifestUnavailable");
 });
 test("Python without tests is supported but missing coverage remains explicit",()=>{
   const result=verificationReadiness([{path:"requirements.txt",content:"python-dotenv==1.2.2"},{path:"main.py"}],{scope:"fullstack",backendTarget:"Python + FastAPI"});
