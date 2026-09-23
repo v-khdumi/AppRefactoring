@@ -1,0 +1,14 @@
+/node_modules
+/.next
+/out
+*.log
+.env
+.env.*
+!.env.example
+.vercel
+*.tsbuildinfo
+.azure/
+.tools/
+.vscode/
+/build-exit.txt
+/build-output.txt

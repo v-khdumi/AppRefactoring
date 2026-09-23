@@ -1,0 +1,63 @@
+import { z } from "zod";
+import { env } from "@/lib/env";
+import { foundryModelParameters } from "@/lib/foundry-model";
+import { resilientFetch } from "@/lib/resilient-fetch";
+
+const frontendTargets=["Next.js 15 + TypeScript","React 19 + TypeScript","Angular 19","Vue 3 + TypeScript"] as const;
+const backendTargets=[".NET 9 Minimal APIs","Java 21 + Spring Boot 3","Node.js + NestJS","Python + FastAPI"] as const;
+
+export const stackRecommendationSchema=z.object({
+  scope:z.enum(["frontend","backend","fullstack"]),frontendTarget:z.enum(frontendTargets),backendTarget:z.enum(backendTargets),
+  confidence:z.number().min(0).max(100),rationale:z.array(z.string()).min(1).max(6),detectedStack:z.array(z.string()).max(12),
+  alternatives:z.array(z.object({target:z.string(),tradeoff:z.string()})).max(4),risks:z.array(z.string()).max(8),
+  source:z.enum(["foundry","evidence-fallback"]).default("foundry"),warning:z.string().optional(),
+});
+export type StackRecommendation=z.infer<typeof stackRecommendationSchema>&{evidence?:import("./repository-evidence").RepositoryEvidence;verificationReadiness?:import("./verification-readiness").VerificationReadiness};
+
+const rawSchema=z.object({scope:z.string().optional(),frontendTarget:z.string().optional(),backendTarget:z.string().optional(),confidence:z.coerce.number().optional(),rationale:z.array(z.unknown()).optional(),detectedStack:z.array(z.unknown()).optional(),alternatives:z.array(z.unknown()).optional(),risks:z.array(z.unknown()).optional()}).passthrough();
+
+export async function recommendStack(input:{repository:string;scope:StackRecommendation["scope"];paths:string[];samples:Array<{path:string;content:string}>;evidence?:import("./repository-evidence").RepositoryEvidence}):Promise<StackRecommendation>{
+ const detected=evidenceRecommendation(input);
+ const fallback={...detected,scope:input.scope,rationale:[`User-selected scope: ${input.scope}. Other layers remain unchanged integration dependencies.`,...(input.scope!=="backend"?[`Frontend target: ${detected.frontendTarget}; validate existing API and UI contracts.`]:[]),...(input.scope!=="frontend"?[`Backend target: ${detected.backendTarget}; validate callers, persistence and dependency compatibility.`]:[])],alternatives:detected.alternatives.filter(item=>input.scope==="fullstack"||(input.scope==="frontend"?frontendTargets.includes(item.target as typeof frontendTargets[number]):backendTargets.includes(item.target as typeof backendTargets[number])))};
+ if(!env.AZURE_AI_FOUNDRY_ENDPOINT||!env.AZURE_AI_FOUNDRY_API_KEY)return fallback;
+ try{
+  const system=`You are a principal application modernization architect. The user selected ${input.scope}; scope is fixed and must not be expanded. For frontend, recommend UI changes only and preserve existing backend/data contracts. For backend, recommend services/data changes only and preserve the UI. For fullstack, address both and their integration contracts. Evaluate declared dependencies, runtime versions, lockfiles, shared libraries and external integrations from supplied evidence; explicitly name missing evidence. Do not claim a complete dependency graph or compatibility testing from samples. Return one JSON object only. scope must equal ${input.scope}. frontendTarget must be exactly one of: ${frontendTargets.join(", ")}. backendTarget must be exactly one of: ${backendTargets.join(", ")}. Include confidence 0-100, rationale string array, detectedStack string array, alternatives array with target and tradeoff, and risks string array. Discuss implementation only within the selected scope; other layers are dependencies, not rewrite targets.`;
+  const response=await resilientFetch(`${env.AZURE_AI_FOUNDRY_ENDPOINT.replace(/\/$/,"")}/chat/completions?api-version=${encodeURIComponent(process.env.AZURE_AI_FOUNDRY_API_VERSION||"2024-05-01-preview")}`,{method:"POST",headers:{"Content-Type":"application/json","api-key":env.AZURE_AI_FOUNDRY_API_KEY},body:JSON.stringify({model:env.AZURE_AI_FOUNDRY_MODEL,...foundryModelParameters(env.AZURE_AI_FOUNDRY_MODEL,0),response_format:{type:"json_object"},messages:[{role:"system",content:system},{role:"user",content:JSON.stringify(input)}]}),attempts:3,timeoutMs:90000,operation:"foundry.stack_recommendation"});
+  if(!response.ok)return fallback;
+  const payload=await response.json() as {choices?:Array<{message?:{content?:string}}>};const content=payload.choices?.[0]?.message?.content;
+  if(!content)return fallback;
+  try{return normalizeRecommendation(rawSchema.parse(JSON.parse(extractJson(content))),fallback)}catch{const repaired=await repairRecommendation(content,input.repository,input.scope);return normalizeRecommendation(rawSchema.parse(repaired),fallback)}
+ }catch(error){console.error("Foundry recommendation normalization failed",error instanceof Error?error.message:error);return{...fallback,source:"evidence-fallback"};}
+}
+
+async function repairRecommendation(content:string,repository:string,scope:StackRecommendation["scope"]){
+ const endpoint=env.AZURE_AI_FOUNDRY_ENDPOINT!.replace(/\/$/,"");
+ const response=await resilientFetch(`${endpoint}/chat/completions?api-version=${encodeURIComponent(process.env.AZURE_AI_FOUNDRY_API_VERSION||"2024-05-01-preview")}`,{method:"POST",headers:{"Content-Type":"application/json","api-key":env.AZURE_AI_FOUNDRY_API_KEY!},body:JSON.stringify({model:env.AZURE_AI_FOUNDRY_MODEL,...foundryModelParameters(env.AZURE_AI_FOUNDRY_MODEL,0),response_format:{type:"json_object"},messages:[{role:"system",content:`Repair the supplied modernization recommendation into one valid JSON object. The user-selected scope is ${scope}; preserve it and do not propose work outside it. Keep technology values as strings; they will be normalized by the application. Required keys: scope, frontendTarget, backendTarget, confidence, rationale, detectedStack, alternatives, risks.`},{role:"user",content:JSON.stringify({repository,scope,rawResponse:content.slice(0,30000)})}]}),attempts:2,timeoutMs:45000,operation:"foundry.stack_repair"});
+ if(!response.ok)throw new Error("Recommendation repair failed.");const payload=await response.json() as {choices?:Array<{message?:{content?:string}}>};const repaired=payload.choices?.[0]?.message?.content;if(!repaired)throw new Error("Recommendation repair returned no content.");return JSON.parse(extractJson(repaired));
+}
+
+function normalizeRecommendation(raw:z.infer<typeof rawSchema>,fallback:StackRecommendation):StackRecommendation{
+ const text=(value:unknown,max=800)=>typeof value==="string"?value.trim().slice(0,max):"";
+ const list=(value:unknown[]|undefined,max:number)=>value?.map(item=>text(item)).filter(Boolean).slice(0,max)||[];
+ const alternatives=(raw.alternatives||[]).map(item=>{if(typeof item==="string")return{target:text(item,240),tradeoff:"Alternative suggested by Microsoft Foundry."};if(item&&typeof item==="object"){const value=item as Record<string,unknown>;return{target:text(value.target||value.name,240),tradeoff:text(value.tradeoff||value.rationale||value.description,800)}}return null}).filter((item):item is {target:string;tradeoff:string}=>Boolean(item?.target&&item?.tradeoff)).slice(0,4);
+ const result:StackRecommendation={scope:fallback.scope,frontendTarget:normalizeFrontend(raw.frontendTarget,fallback.frontendTarget),backendTarget:normalizeBackend(raw.backendTarget,fallback.backendTarget),confidence:Math.max(0,Math.min(100,Math.round(raw.confidence??fallback.confidence))),rationale:list(raw.rationale,6),detectedStack:list(raw.detectedStack,12),alternatives,risks:list(raw.risks,8),source:"foundry"};
+ if(!result.rationale.length)result.rationale=fallback.rationale;if(!result.detectedStack.length)result.detectedStack=fallback.detectedStack;if(!result.alternatives.length)result.alternatives=fallback.alternatives;if(!result.risks.length)result.risks=fallback.risks;
+ if(fallback.scope!=="frontend"&&!["Node.js + NestJS","Python + FastAPI"].includes(result.backendTarget))return {...fallback,source:"evidence-fallback",warning:"The model proposed a runtime without an installed verifier. The supported evidence-based target is shown instead."};
+ return stackRecommendationSchema.parse(result);
+}
+
+function evidenceRecommendation(input:{paths:string[];samples:Array<{path:string;content:string}>}):StackRecommendation{
+ const evidence=`${input.paths.join("\n")}\n${input.samples.map(sample=>`${sample.path}\n${sample.content.slice(0,3000)}`).join("\n")}`.toLowerCase();
+ const has=(pattern:RegExp)=>pattern.test(evidence);const detected:string[]=[];
+ if(has(/\.csproj|\.sln|asp\.net|using system/))detected.push("C# / .NET");if(has(/pom\.xml|build\.gradle|spring/))detected.push("Java / JVM");if(has(/requirements\.txt|pyproject\.toml|\.py\b|fastapi|django|flask|tkinter/))detected.push("Python");if(has(/package\.json|\.tsx?\b|react|angular|vue/))detected.push("JavaScript / TypeScript");if(has(/\.aspx|web forms/))detected.push("ASP.NET Web Forms");if(has(/sql server|\.sql\b/))detected.push("Relational database");
+ const backend:StackRecommendation["backendTarget"]=has(/\.csproj|\.sln|asp\.net/)?".NET 9 Minimal APIs":has(/pom\.xml|build\.gradle|spring/)?"Java 21 + Spring Boot 3":has(/requirements\.txt|pyproject\.toml|\.py\b|fastapi|django|flask|tkinter/)?"Python + FastAPI":"Node.js + NestJS";
+ const frontend:StackRecommendation["frontendTarget"]=has(/angular/)?"Angular 19":has(/vue/)?"Vue 3 + TypeScript":has(/react/)?"React 19 + TypeScript":"Next.js 15 + TypeScript";
+ const frontendEvidence=has(/\.tsx?|\.jsx?|\.html|\.css|react|angular|vue|web forms|tkinter/);const backendEvidence=has(/\.cs|\.java|\.py|controller|service|database|sql|api/);const scope:StackRecommendation["scope"]=frontendEvidence&&backendEvidence?"fullstack":frontendEvidence?"frontend":"backend";
+ return stackRecommendationSchema.parse({scope,frontendTarget:frontend,backendTarget:backend,confidence:detected.length>=3?82:68,detectedStack:detected.length?detected:["Repository structure analyzed"],rationale:[`The recommendation preserves the dominant backend ecosystem by targeting ${backend}.`,`The selected frontend target, ${frontend}, provides a supported modern UI path with strong TypeScript tooling.`,scope==="fullstack"?"Frontend and backend evidence is present, so a coordinated full-stack modernization reduces contract drift.":`Repository evidence supports a focused ${scope} modernization.`],alternatives:[{target:frontend==="Next.js 15 + TypeScript"?"React 19 + TypeScript":"Next.js 15 + TypeScript",tradeoff:"A viable UI alternative with different routing, rendering, and deployment trade-offs."},{target:backend==="Node.js + NestJS"?"Python + FastAPI":"Node.js + NestJS",tradeoff:"A cross-language alternative that may increase behavior-parity and team-transition risk."}],risks:["Repository-wide behavior must be captured before generated changes are approved.","External integrations and persistence contracts require independent validation."],source:"evidence-fallback"});
+}
+
+function normalizeFrontend(value:string|undefined,fallback:StackRecommendation["frontendTarget"]){const v=value?.toLowerCase()||"";return v.includes("next")?frontendTargets[0]:v.includes("angular")?frontendTargets[2]:v.includes("vue")?frontendTargets[3]:v.includes("react")?frontendTargets[1]:fallback}
+function normalizeBackend(value:string|undefined,fallback:StackRecommendation["backendTarget"]){const v=value?.toLowerCase()||"";return v.includes(".net")||v.includes("dotnet")?backendTargets[0]:v.includes("java")||v.includes("spring")?backendTargets[1]:v.includes("python")||v.includes("fastapi")?backendTargets[3]:v.includes("node")||v.includes("nest")?backendTargets[2]:fallback}
+function extractJson(content:string){const fenced=content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];const candidate=fenced||content;const start=candidate.indexOf("{");const end=candidate.lastIndexOf("}");return start>=0&&end>start?candidate.slice(start,end+1):candidate}
+
+export function demoStackRecommendation():StackRecommendation{return{...evidenceRecommendation({paths:["OrderHub.sln","Web/Orders.aspx.cs","packages.config","Data/schema.sql"],samples:[{path:"Web/Orders.aspx.cs",content:"ASP.NET Web Forms code-behind using C# and SQL Server"}]}),confidence:92,detectedStack:["ASP.NET Web Forms",".NET Framework 4.6.2","jQuery 1.12","SQL Server","SOAP integrations"],source:"foundry"};}

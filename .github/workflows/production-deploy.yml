@@ -1,0 +1,78 @@
+name: Production deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY to confirm the production release
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: modernize-ai-production
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: inputs.confirmation == 'DEPLOY'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Compile production infrastructure
+        uses: azure/cli@v2
+        with:
+          inlineScript: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: Azure/setup-azd@v2
+      - run: azd auth login --client-id "${{ secrets.AZURE_CLIENT_ID }}" --federated-credential-provider github --tenant-id "${{ secrets.AZURE_TENANT_ID }}"
+      - name: Deploy migration-capable worker
+        run: azd deploy worker --no-prompt
+        env:
+          AZURE_ENV_NAME: production
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      - name: Run database migration job
+        run: az containerapp job start --name "$(azd env get-value MIGRATION_JOB_NAME)" --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"
+      - name: Deploy outbox
+        run: azd deploy outbox --no-prompt
+        env:
+          AZURE_ENV_NAME: production
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      - name: Deploy web
+        run: azd deploy web --no-prompt
+        env:
+          AZURE_ENV_NAME: production
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      - name: Verify operational health
+        shell: bash
+        run: |
+          endpoint="$(azd env get-value SERVICE_WEB_URI)"
+          response="$(curl --fail --retry 8 --retry-delay 10 --max-time 30 -H "x-health-check-token: $HEALTH_CHECK_TOKEN" "$endpoint/api/health?deep=true")"
+          node -e 'const health=JSON.parse(process.argv[1]); if(health.status!=="healthy"||health.mode!=="live"||health.operations?.queue?.deadLetterMessages!==0) process.exit(1)' "$response"
+        env:
+          HEALTH_CHECK_TOKEN: ${{ secrets.HEALTH_CHECK_TOKEN }}

@@ -1,0 +1,20 @@
+"use client";
+import {useEffect,useState} from "react";
+import {Box,FileText,RefreshCw} from "lucide-react";
+import {useModernizeAuth} from "@/components/auth-provider";
+import {requestJson} from "@/lib/request-json";
+import type {AnalysisResult,ArchitectureNode} from "@/types/modernization";
+import type {RepositoryEvidence} from "@/lib/repository-evidence";
+export function DependencyEvidence({evidence}:{evidence:RepositoryEvidence}){
+ return <details className="dependency-evidence"><summary>Dependency evidence · {evidence.readManifests.length}/{evidence.manifests.length} manifests read · {evidence.lockfiles.length} lockfiles found</summary><dl><div><dt>Read manifests</dt><dd>{evidence.readManifests.join(", ")||"None"}</dd></div><div><dt>Omitted manifests</dt><dd>{evidence.omittedManifests.join(", ")||"None within the detected inventory"}</dd></div><div><dt>Lockfiles found</dt><dd>{evidence.lockfiles.join(", ")||"None detected"}</dd></div></dl>{evidence.limits.map(limit=><p key={limit}>{limit}</p>)}</details>;
+}
+type ArchitectureData={repository:string;scope:string;sourceCommitSha?:string;origin:string;stale:boolean;analysis:AnalysisResult|null;currentNodes:ArchitectureNode[];targetNodes:ArchitectureNode[];documents:Array<{path:string;content:string}>};
+export function ProjectArchitecture({runId}:{runId:string}){
+ const {authorizedFetch}=useModernizeAuth();const [data,setData]=useState<ArchitectureData|null>(null);const [error,setError]=useState("");const [selected,setSelected]=useState("");const [revision,setRevision]=useState(0);
+ useEffect(()=>{let active=true;setData(null);setError("");void requestJson<ArchitectureData>(authorizedFetch,`/api/transformations/${runId}/architecture`,{cache:"no-store"},20000,"Architecture lookup timed out.").then(result=>{if(active)setData(result);}).catch(caught=>{if(active)setError(caught.message);});return()=>{active=false;};},[runId,revision,authorizedFetch]);
+ if(error)return <div className="error-note" role="alert">{error}<button className="secondary-button" onClick={()=>setRevision(value=>value+1)}><RefreshCw size={14}/>Retry lookup</button></div>;
+ if(!data)return <p role="status">Loading project architecture...</p>;
+ const document=data.documents.find(item=>item.path===selected)||data.documents[0];
+ const nodes=(items:ArchitectureNode[])=>items.length?<div className="project-architecture-nodes">{items.map(node=><article key={node.id}><Box size={18}/><div><h4>{node.label}</h4><p>{node.detail}</p><small>{node.kind}</small></div></article>)}</div>:<p>No diagram was saved for this stage.</p>;
+ return <section className="project-architecture"><header><h2>{data.repository}</h2><p>{data.scope==="fullstack"?"Full app":data.scope} · {data.sourceCommitSha?.slice(0,12)||"Source snapshot pending"}</p></header>{data.stale&&<p className="error-note">This analysis refers to an earlier source commit. Review it before relying on the proposal.</p>}{data.analysis&&<p>{data.analysis.summary}</p>}<div className="project-architecture-compare"><section><h3>Current architecture</h3>{nodes(data.currentNodes)}</section><section><h3>Proposed architecture</h3><p>{data.origin==="generated-file-inventory"?"Component inventory from generated files. The original AI analysis was not saved for this run; architectural decisions are in the documents below.":data.origin==="reviewed-revision"?"Latest saved architecture revision.":"Saved AI proposal for the selected scope."}</p>{nodes(data.targetNodes)}</section></div><p className="architecture-boundary-note">Logical components, not verified network connections or deployed Azure resources.</p>{data.analysis?.evidence?<DependencyEvidence evidence={data.analysis.evidence}/>:<p>Dependency-analysis evidence was not saved for this run. Executed dependency audits remain available in Verification.</p>}{document&&<section className="architecture-documents"><label><FileText size={16}/>Architecture document<select value={document.path} onChange={event=>setSelected(event.target.value)}>{data.documents.map(item=><option key={item.path}>{item.path}</option>)}</select></label><pre>{document.content}</pre></section>}</section>;
+}

@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.env*
+!.env.example
+npm-debug.log*
+README.md
+.tools
+.azure
+.vscode
+*.log
+*-exit.txt
+*-output.txt
+tsconfig.tsbuildinfo

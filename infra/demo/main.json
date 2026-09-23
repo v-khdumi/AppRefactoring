@@ -1,0 +1,193 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "7108134326402990651"
+    }
+  },
+  "parameters": {
+    "environmentName": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "normalized": "[toLower(replace(parameters('environmentName'), '-', ''))]",
+    "suffix": "[take(uniqueString(subscription().id, resourceGroup().id), 6)]",
+    "prefix": "[format('modernize-{0}-{1}', take(variables('normalized'), 8), variables('suffix'))]",
+    "tags": {
+      "azd-env-name": "[parameters('environmentName')]",
+      "application": "modernize-ai",
+      "environment": "demo"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[take(replace(format('{0}acr', variables('prefix')), '-', ''), 50)]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "publicNetworkAccess": "Enabled",
+        "zoneRedundancy": "Disabled"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[format('{0}-logs', variables('prefix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "retentionInDays": 30,
+        "sku": {
+          "name": "PerGB2018"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-env', variables('prefix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', variables('prefix'))), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', variables('prefix'))), '2023-09-01').primarySharedKey]"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', variables('prefix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-web', variables('prefix'))]",
+      "location": "[parameters('location')]",
+      "tags": "[union(variables('tags'), createObject('azd-service-name', 'web'))]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', variables('prefix')))]",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "targetPort": 3000,
+            "transport": "auto",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "web",
+              "image": "mcr.microsoft.com/k8se/quickstart:latest",
+              "resources": {
+                "cpu": "[json('0.5')]",
+                "memory": "1Gi"
+              },
+              "env": [
+                {
+                  "name": "NODE_ENV",
+                  "value": "production"
+                },
+                {
+                  "name": "DEMO_MODE",
+                  "value": "true"
+                },
+                {
+                  "name": "NEXT_TELEMETRY_DISABLED",
+                  "value": "1"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/api/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 25,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/api/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 8,
+                  "periodSeconds": 10
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 3,
+            "rules": [
+              {
+                "name": "http",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', variables('prefix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', take(replace(format('{0}acr', variables('prefix')), '-', ''), 50))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', take(replace(format('{0}acr', variables('prefix')), '-', ''), 50)), resourceId('Microsoft.App/containerApps', format('{0}-web', variables('prefix'))), 'acrpull')]",
+      "properties": {
+        "principalId": "[reference(resourceId('Microsoft.App/containerApps', format('{0}-web', variables('prefix'))), '2024-03-01', 'full').identity.principalId]",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', format('{0}-web', variables('prefix')))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries', take(replace(format('{0}acr', variables('prefix')), '-', ''), 50))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "AZURE_CONTAINER_REGISTRY_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', take(replace(format('{0}acr', variables('prefix')), '-', ''), 50)), '2023-07-01').loginServer]"
+    },
+    "SERVICE_WEB_NAME": {
+      "type": "string",
+      "value": "[format('{0}-web', variables('prefix'))]"
+    },
+    "SERVICE_WEB_URI": {
+      "type": "string",
+      "value": "[format('https://{0}', reference(resourceId('Microsoft.App/containerApps', format('{0}-web', variables('prefix'))), '2024-03-01').configuration.ingress.fqdn)]"
+    }
+  }
+}

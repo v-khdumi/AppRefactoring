@@ -1,0 +1,49 @@
+name: modernize-ai
+metadata:
+  template: modernize-ai@1.0.0
+resourceGroup: ${AZURE_RESOURCE_GROUP}
+infra:
+  provider: bicep
+  path: infra
+services:
+  web:
+    project: .
+    host: containerapp
+    language: docker
+    resourceName: ${SERVICE_WEB_NAME}
+    docker:
+      path: Dockerfile
+      context: .
+      remoteBuild: true
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+      buildArgs:
+        - NEXT_PUBLIC_AZURE_TENANT_ID=${AZURE_TENANT_ID}
+        - NEXT_PUBLIC_AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+        - NEXT_PUBLIC_AZURE_API_SCOPE=api://${AZURE_CLIENT_ID}/Modernization.Access
+  worker:
+    project: .
+    host: containerapp
+    language: docker
+    resourceName: ${SERVICE_WORKER_NAME}
+    docker:
+      path: Dockerfile.worker
+      context: .
+      remoteBuild: true
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+  outbox:
+    project: .
+    host: containerapp
+    language: docker
+    resourceName: ${SERVICE_OUTBOX_NAME}
+    docker:
+      path: Dockerfile.outbox
+      context: .
+      remoteBuild: true
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+workflows:
+  up:
+    steps:
+      - azd: provision
+      - azd: deploy --all
+requiredVersions:
+  azd: ">=1.32.0"
