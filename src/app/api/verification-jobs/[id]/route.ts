@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { query, transaction } from "@/lib/db";
 import { changesetDigest, reportPassed, reportMatchesSnapshot, verificationReportSchema } from "@/lib/verification-evidence";
-import { currentChanges } from "@/lib/verification-service";
+import { currentChanges, deleteWindowsVerifier } from "@/lib/verification-service";
 import {acceptPreparedLocks,preparedFilesSchema} from "@/lib/verification-artifacts";
 
 async function capability(request:Request,id:string){
@@ -23,7 +23,9 @@ export async function GET(request:Request,context:{params:Promise<{id:string}>})
   const {id}=await context.params;
   const job=await capability(request,id);
   if(!job)return NextResponse.json({error:"Not found."},{status:404});
-  if(new URL(request.url).searchParams.get("script")==="1")return new Response(await readFile("scripts/verification-runner.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
+  const scriptKind=new URL(request.url).searchParams.get("script");
+  if(scriptKind==="1")return new Response(await readFile("scripts/verification-runner.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
+  if(scriptKind==="windows")return new Response(await readFile("scripts/windows-verification-runner.ps1","utf8"),{headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"}});
   if(!job.snapshot)return NextResponse.json({error:"Snapshot not ready."},{status:409});
   return NextResponse.json(job.snapshot,{headers:{"Cache-Control":"no-store"}});
 }
@@ -42,11 +44,13 @@ export async function POST(request:Request,context:{params:Promise<{id:string}>}
   const parsed=z.object({report:verificationReportSchema,final:z.boolean()}).safeParse(body);
   if(!parsed.success)return NextResponse.json({error:"Invalid execution report."},{status:400});
   const {report,final}=parsed.data;
+  let windowsCleanup=false;
   await transaction(async client=>{
     const runs=await client.query<{source_commit_sha:string;status:string}>("SELECT source_commit_sha,status FROM modernization_runs WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[job.run_id,job.tenant_id]);
     const run=runs.rows[0];
     const current=await client.query("SELECT status,snapshot,source_sha,changeset_digest FROM verification_jobs WHERE id=$1 AND expires_at>now() FOR UPDATE",[id]);
     if(!current.rows[0]||!["running","preparing"].includes(current.rows[0].status))return;
+    windowsCleanup=Boolean(final&&(current.rows[0].snapshot as {windows?:boolean}|null)?.windows);
     const changes=await currentChanges(client,job.run_id);
     const currentJob=current.rows[0];
     const matches=run&&changesetDigest(run.source_commit_sha,changes)===currentJob.changeset_digest&&run.source_commit_sha===currentJob.source_sha;
@@ -61,5 +65,6 @@ export async function POST(request:Request,context:{params:Promise<{id:string}>}
       await client.query("INSERT INTO audit_events(tenant_id,actor_id,actor_name,action,resource_type,resource_id,data) VALUES($1,'verification-runner','Isolated verification runner',$2,'run',$3,$4::jsonb)",[job.tenant_id,`verification.${status}`,job.run_id,JSON.stringify({jobId:id,digest:currentJob.changeset_digest,steps:report.steps.length})]);
     }
   });
+  if(windowsCleanup)setTimeout(()=>{void deleteWindowsVerifier(id).catch(error=>console.error("Windows verifier cleanup failed",error instanceof Error?error.message:error));},5000);
   return NextResponse.json({recorded:true});
 }

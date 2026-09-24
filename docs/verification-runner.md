@@ -54,11 +54,43 @@ write lockfiles.
 Characterization tests for these ecosystems must contain `Characterization` in
 their path. Only those are copied into the verification-only baseline so the
 original application executes them too; tests for new behavior run on the
-candidate only. Original test sources remain immutable. `.NET Framework 4.x`,
-non-SDK project files and `packages.config` require Windows and are refused
-before generation, because the original application cannot be executed here.
-Rewrites across backend runtimes, such as Java to Node.js, are refused because
-they would remove the original executable tests.
+candidate only. Original test sources remain immutable. Rewrites across backend
+runtimes, such as Java to Node.js, are refused because they would remove the
+original executable tests.
+
+## .NET Framework on Windows
+
+Snapshots containing non-SDK project files, `net4x` target frameworks or
+`packages.config` are verified in a per-job Windows container in Azure Container
+Instances, because the original application builds and runs only on Windows.
+The container uses `mcr.microsoft.com/dotnet/framework/sdk:4.8.1` pinned by
+digest (MSBuild, NuGet, VSTest and .NET Framework targeting packs) and installs
+the .NET 10 SDK (SHA-512) plus pinned runtimes when a variant uses SDK-style
+projects. The supervisor script is downloaded through the same job capability.
+It creates separate local accounts for baseline and candidate, restricts each
+work tree to its account, proves before any repository command that the account
+cannot see the capability token, and stops otherwise. Legacy variants use
+`msbuild /t:Restore;Build` and `vstest.console` with TRX counting; SDK-style
+variants use the same `dotnet` matrix as Linux. The audit queries OSV with
+packages from `packages.config` and restored project assets. Evidence carries
+the same command labels, so the server gate is unchanged. Container groups are
+deleted after the final report and by the worker's recovery loop.
+
+Copied `.NET` characterization test projects are retargeted to the framework of
+the original project they reference (for example `net48`, with `LangVersion`
+`latest`). The Windows verifier currently accepts .NET-only repositories;
+mixed .NET Framework and npm/Python repositories are refused with an explanation.
+ASP.NET Web Forms, WCF hosting and IIS behavior are covered only by executable
+tests, not by browser or IIS automation. Pulling the Windows image can take
+10–20 minutes when it is not cached on the Container Instances host.
+
+Evidence: container group `mz-winverify-start-1790234580` verified a legacy
+non-SDK `net48` project with `packages.config` against a `net10.0` candidate.
+Baseline restore, build and tests passed on .NET Framework, as did the copied
+characterization tests retargeted to `net48`. The candidate passed restore,
+build, tests and audit. The baseline `Newtonsoft.Json` 12.0.1 finding
+(GHSA-5crp-9r3c-p9vr, high) was retained as a diagnostic, giving the result
+`passed`.
 
 Source is fetched from the exact recorded commit, including binary blobs, and
 the proposed changes are applied without creating a GitHub branch. Truncated

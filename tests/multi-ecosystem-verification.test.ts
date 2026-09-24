@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {verificationReadiness} from "../src/lib/verification-readiness";
-import {ecosystemUnits,ecosystemVerificationCommands,isImmutableOriginalTest,originalTestPath} from "../src/lib/verification-ecosystems";
+import {ecosystemUnits,ecosystemVerificationCommands,isImmutableOriginalTest,originalTestPath,requiresWindowsVerifier} from "../src/lib/verification-ecosystems";
 import {reportMatchesSnapshot,reportPassed,verificationStepAcceptable,type VerificationReport} from "../src/lib/verification-evidence";
 import {applyBaselineTestHarness} from "../src/lib/baseline-test-harness";
 import {validatePreparedLocks} from "../src/lib/verification-artifacts";
 import {backendTargets} from "../src/lib/modernization-targets";
+import {coordinationContractSchema} from "../src/lib/coordination-contract";
+
+test("single-project libraries can declare public APIs consumed outside the repository",()=>{
+  const contract=(consumers:string[],projects=[{id:"billing",directory:".",runtime:"maven",area:"backend",responsibility:"Billing library public API"}])=>({version:1,scope:"backend",projects,interfaces:[{id:"invoice-api",provider:"billing",consumers,protocol:"in-process",definition:"InvoiceCalculator.totalCents(int,long) returns long and throws IllegalArgumentException for negative input.",authentication:"None; in-process library call.",verification:"Original InvoiceCalculatorTest and characterization tests execute on baseline and candidate."}],preservedBehavior:[{id:"totals",requirement:"Totals and errors remain identical.",verification:"Characterization tests pass on both variants."}]});
+  assert.equal(coordinationContractSchema.safeParse(contract(["external"])).success,true);
+  assert.equal(coordinationContractSchema.safeParse(contract(["billing"])).success,false);
+  assert.equal(coordinationContractSchema.safeParse(contract(["unknown"])).success,false);
+  assert.equal(coordinationContractSchema.safeParse(contract(["external"],[{id:"external",directory:".",runtime:"maven",area:"backend",responsibility:"Reserved identifier misuse"}])).success,false);
+  const twoProjects=[{id:"api",directory:"api",runtime:"go",area:"backend",responsibility:"HTTP service implementation"},{id:"web",directory:"web",runtime:"npm",area:"frontend",responsibility:"Browser client application"}];
+  assert.equal(coordinationContractSchema.safeParse({...contract(["external"],twoProjects),interfaces:[{...contract(["external"]).interfaces[0],provider:"api"}]}).success,false);
+});
 
 const file=(path:string,content="")=>({path,content:Buffer.from(content).toString("base64"),executable:false});
 const webProject='<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>';
@@ -30,10 +41,20 @@ test("readiness accepts SDK-style .NET, JVM, Go and PHP with reproducible depend
   assert.equal(verificationReadiness([{path:"composer.json",content:composer},{path:"composer.lock"},{path:"tests/InvoiceTest.php"}],{scope:"backend",backendTarget:"PHP 8.5 + Laravel 13"}).supported,true);
 });
 
-test("Windows-only .NET Framework and cross-runtime rewrites are refused with an explanation",()=>{
-  const legacy=verificationReadiness([{path:"Web/Web.csproj",content:'<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><PropertyGroup><TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion></PropertyGroup></Project>'},{path:"Web/packages.config"}],{scope:"backend",backendTarget:".NET 10 + ASP.NET Core"});
-  assert.equal(legacy.supported,false);assert.ok(legacy.blockers.every(item=>item.code==="DotNetFrameworkRequiresWindows"));assert.match(legacy.blockers[0].message,/Windows/);
-  assert.equal(verificationReadiness([{path:"App.csproj",content:'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>net48;net8.0</TargetFrameworks></PropertyGroup></Project>'}],{scope:"backend"}).supported,false);
+test("Windows .NET Framework verification is routed explicitly and cross-runtime rewrites are refused",()=>{
+  const legacyProject='<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><PropertyGroup><TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion></PropertyGroup></Project>';
+  const legacy=verificationReadiness([{path:"Web/Web.csproj",content:legacyProject},{path:"Web/packages.config"}],{scope:"backend",backendTarget:".NET 10 + ASP.NET Core"});
+  assert.equal(legacy.supported,true);assert.ok(legacy.warnings.some(item=>item.code==="WindowsVerifier"));
+  const mixed=verificationReadiness([{path:"Web/Web.csproj",content:legacyProject},{path:"ui/package.json",content:'{"scripts":{"build":"vite build","test":"vitest"}}'},{path:"ui/package-lock.json"}],{scope:"fullstack",backendTarget:".NET 10 + ASP.NET Core"});
+  assert.equal(mixed.supported,false);assert.ok(mixed.blockers.some(item=>item.code==="WindowsVerifierDotnetOnly"));
+  assert.equal(requiresWindowsVerifier([file("Web/Web.csproj",legacyProject)]),true);
+  assert.equal(requiresWindowsVerifier([file("App.csproj",'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>net48;net8.0</TargetFrameworks></PropertyGroup></Project>')]),true);
+  assert.equal(requiresWindowsVerifier([file("src/Api/Api.csproj",webProject)]),false);
+  for(const framework of ["net10.0","net11.0","net8.0","netcoreapp3.1","netstandard2.0"])assert.equal(requiresWindowsVerifier([file("App.csproj",`<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>${framework}</TargetFramework></PropertyGroup></Project>`)]),false,framework);
+  for(const framework of ["net48","net481","net472","net35"])assert.equal(requiresWindowsVerifier([file("App.csproj",`<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>${framework}</TargetFramework></PropertyGroup></Project>`)]),true,framework);
+  const baseline=applyBaselineTestHarness([file("src/Billing/Billing.csproj",legacyProject)],[file("src/Billing/Billing.csproj",webProject.replace("net8.0","net10.0")),file("tests/Billing.CharacterizationTests/Billing.CharacterizationTests.csproj",testProject.replace("net8.0","net10.0").replace("</Project>",'<ItemGroup><ProjectReference Include="../../src/Billing/Billing.csproj" /></ItemGroup></Project>')),file("tests/Billing.CharacterizationTests/TotalTests.cs","test")]);
+  const copied=Buffer.from(baseline.find(item=>item.path.endsWith("CharacterizationTests.csproj"))!.content,"base64").toString("utf8");
+  assert.match(copied,/<TargetFramework>net472<\/TargetFramework>/);assert.match(copied,/<LangVersion>latest<\/LangVersion>/);
   const cross=verificationReadiness([{path:"pom.xml",content:pom},{path:"src/test/java/AppTest.java"}],{scope:"backend",backendTarget:"Node.js + NestJS"});
   assert.equal(cross.supported,false);assert.equal(cross.blockers[0].code,"CrossRuntimeTarget");assert.match(cross.blockers[0].message,/Java 25 \+ Spring Boot 4/);
   assert.equal(verificationReadiness([{path:"src/Api/Api.csproj",content:webProject}],{scope:"frontend",backendTarget:"Node.js + NestJS"}).blockers.length,0);

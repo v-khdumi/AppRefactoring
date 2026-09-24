@@ -17,6 +17,15 @@ export const testBuildFile=/\.(csproj|fsproj|vbproj)$|(^|\/)(pom\.xml|build\.gra
 export function isImmutableOriginalTest(path:string){return originalTestPath.test(path)&&!testBuildFile.test(path);}
 
 export function isDotnetTestProject(content:string){return /Microsoft\.NET\.Test\.Sdk|<IsTestProject>\s*true\s*<\/IsTestProject>|Sdk="MSTest\.Sdk|xunit\.v3|TUnit/i.test(content);}
+export function isDotnetFrameworkProject(content:string){return !/<Project\b[^>]*\bSdk\s*=/i.test(content)||[...content.matchAll(/<TargetFrameworks?>([^<]+)<\/TargetFrameworks?>/gi)].some(match=>match[1].split(";").some(item=>/^net[1-4]\d{1,2}$/i.test(item.trim())))||/<TargetFrameworkVersion>\s*v[1-4]/i.test(content);}
+export function dotnetFrameworkMoniker(content:string){
+  const version=content.match(/<TargetFrameworkVersion>\s*v(\d)\.(\d)(?:\.(\d))?\s*</i);
+  if(version)return `net${version[1]}${version[2]}${version[3]||""}`;
+  return content.match(/<TargetFrameworks?>\s*([^<;]+)/i)?.[1].trim();
+}
+export function requiresWindowsVerifier(files:Array<{path:string;content:string}>){
+  return files.some(file=>/(^|\/)packages\.config$/i.test(file.path)&&!ignoredManifestPath.test(file.path)||dotnetProject.test(file.path)&&!ignoredManifestPath.test(file.path)&&isDotnetFrameworkProject(Buffer.from(file.content,"base64").toString("utf8")));
+}
 
 const directory=(path:string)=>path.includes("/")?path.slice(0,path.lastIndexOf("/")):".";
 function roots(paths:string[],pattern:RegExp){

@@ -15,7 +15,7 @@ import {readVerificationReadiness,VerificationReadinessError} from "../src/lib/v
 import {withRunLock,requireActiveRun,RunInterruptedError} from "../src/lib/run-coordination";
 import { processAndSettle } from "../src/lib/message-processing";
 import { validationExecution } from "../src/lib/validation-execution";
-import { prepareVerification, dispatchVerification,recoverVerificationDispatches } from "../src/lib/verification-service";
+import { prepareVerification, dispatchVerification,recoverVerificationDispatches,cleanupWindowsVerifiers } from "../src/lib/verification-service";
 
 type Run={id:string;repository_url:string;source_branch:string;source_commit_sha:string|null;scope:ModernizationScope;options:Record<string,unknown>;status:string};
 type RunIdentity={id:string;tenantId:string;token:string};
@@ -159,7 +159,7 @@ const heartbeatTimer=setInterval(()=>void heartbeat().catch(error=>logEvent("err
 let recoveryRunning=false;
 async function recoverOrphanedRuns(){if(recoveryRunning||stopping)return;recoveryRunning=true;try{const orphaned=await database().query<{id:string;tenant_id:string}>(`SELECT id,tenant_id FROM modernization_runs WHERE (status IN ('queued','retrying') AND updated_at < now()-interval '2 minutes') OR (status='running' AND last_heartbeat_at < now()-interval '45 minutes') ORDER BY updated_at LIMIT 5`);for(const run of orphaned.rows)try{await processRun({body:{runId:run.id,tenantId:run.tenant_id,recovery:true},messageId:`recovery-${run.id}`,correlationId:run.id} as ServiceBusReceivedMessage);}catch(error){logEvent("error","worker.run_recovery_failed",{runId:run.id,error});}}catch(error){logEvent("error","worker.recovery_failed",{error});}finally{recoveryRunning=false;}}
 let verificationRecoveryRunning=false;
-async function recoverVerification(){if(verificationRecoveryRunning||stopping)return;verificationRecoveryRunning=true;try{await recoverVerificationDispatches();}catch(error){logEvent('error','verification.recovery_failed',{error});}finally{verificationRecoveryRunning=false;}}
+async function recoverVerification(){if(verificationRecoveryRunning||stopping)return;verificationRecoveryRunning=true;try{await recoverVerificationDispatches();}catch(error){logEvent('error','verification.recovery_failed',{error});}try{await cleanupWindowsVerifiers();}catch(error){logEvent('error','verification.windows_cleanup_failed',{error});}finally{verificationRecoveryRunning=false;}}
 const recoveryTimer=setInterval(()=>{void recoverOrphanedRuns();void recoverVerification();},60_000);recoveryTimer.unref();
 const subscription = receiver.subscribe({
   async processMessage(message) {

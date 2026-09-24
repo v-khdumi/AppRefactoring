@@ -1,7 +1,7 @@
 import type {ModernizationScope} from "../types/modernization";
 import {mapConcurrent} from "./agent-concurrency";
 import {backendTargetFor,backendTargetRuntimes,backendTargets,isBackendTarget,type VerificationRuntime} from "./modernization-targets";
-import {dotnetProject,ecosystemUnits,ignoredManifestPath,isDotnetTestProject} from "./verification-ecosystems";
+import {dotnetProject,ecosystemUnits,ignoredManifestPath,isDotnetFrameworkProject,isDotnetTestProject} from "./verification-ecosystems";
 
 export interface ReadinessFile {path:string;content?:string;size?:number}
 export interface VerificationReadiness {
@@ -52,13 +52,16 @@ export function verificationReadiness(files:ReadinessFile[],options:{scope:Moder
     const unitFiles=files.filter(file=>within(unit.project,file.path));
     if(unit.runtime==="dotnet"){
       const projects=files.filter(file=>dotnetProject.test(file.path)&&!ignoredManifestPath.test(file.path));
+      let windows=files.some(file=>/(^|\/)packages\.config$/i.test(file.path));
       for(const project of projects){
         if(project.content===undefined){result.blockers.push({code:"ManifestUnavailable",path:project.path,message:"The .NET project file could not be read completely."});continue;}
-        const sdkStyle=/<Project\b[^>]*\bSdk\s*=/i.test(project.content);
-        const frameworks=[...project.content.matchAll(/<TargetFrameworks?>([^<]+)<\/TargetFrameworks?>/gi)].flatMap(match=>match[1].split(";").map(item=>item.trim()));
-        if(!sdkStyle||frameworks.some(framework=>/^net[1-4]\d*$/i.test(framework))||/<TargetFrameworkVersion>\s*v[1-4]/i.test(project.content))result.blockers.push({code:"DotNetFrameworkRequiresWindows",path:project.path,message:".NET Framework 4.x projects build and run only on Windows. The isolated Linux verifier cannot execute this original application, so behavior preservation cannot be proven. Supported: SDK-style .NET Core 2.1+ and .NET 5-10."});
+        if(isDotnetFrameworkProject(project.content))windows=true;
       }
-      if(files.some(file=>/(^|\/)packages\.config$/i.test(file.path)))result.blockers.push({code:"DotNetFrameworkRequiresWindows",message:"packages.config indicates a .NET Framework project that the Linux verifier cannot restore or execute."});
+      if(windows){
+        result.warnings.push({code:"WindowsVerifier",path:".",message:".NET Framework projects are verified in an isolated Windows container (MSBuild, NuGet and VSTest from the pinned .NET Framework 4.8.1 SDK image). ASP.NET Web Forms, WCF hosting and IIS behavior are verified only through executable tests."});
+        const others=ecosystemUnits(allPaths).filter(item=>item.runtime!=="dotnet");
+        if(others.length||result.projects.some(item=>item.runtime==="npm"||item.runtime==="python"))result.blockers.push({code:"WindowsVerifierDotnetOnly",message:"The Windows .NET Framework verifier currently executes .NET projects only. Remove or separate the other runtime projects from this repository scope."});
+      }
       if(!projects.some(project=>project.content&&isDotnetTestProject(project.content)))result.warnings.push({code:"TestsRequired",path:".",message:"No .NET test project was found. Characterization test projects must be generated and executed on baseline and candidate."});
     }
     if(unit.runtime==="maven"||unit.runtime==="gradle"){

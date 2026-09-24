@@ -73,6 +73,30 @@ that every legacy application or external integration has been verified.
 The five inspected dead-letter messages are September 5 failed attempts for the
 subsequently published wealth run. They were not replayed or silently discarded.
 
+### Application Update, 2026-09-24
+
+Refactoring now covers npm, Python, .NET (SDK-style and .NET Framework), Maven,
+Gradle, Go and PHP/Composer. Real Foundry generations were verified in Azure for
+each compiled ecosystem: .NET `modernize-isolated-verifier-b8tcy16`, Gradle
+`wi8fe10`, PHP `50j1610`, Go `9pj4euq` and Maven `w1bup6d`. Candidates were clean;
+baseline-only high findings are diagnostics.
+
+.NET Framework repositories run in a per-job Windows Container Instances group,
+verified by `mz-winverify-start-1790234580` (legacy `net48` baseline with
+`packages.config`, `net10.0` candidate, result `passed`). That group needs the
+custom role "ModernizeAI Windows verification container operator"
+(`Microsoft.ContainerInstance/containerGroups` read/write/delete on the resource
+group) for the web and worker identities, plus the registered
+`Microsoft.ContainerInstance` provider.
+
+The Windows verifier accepts .NET-only repositories. Mixed .NET Framework and
+npm/Python repositories are refused with an explanation.
+
+The five obsolete dead-letter messages for the published wealth run were
+completed with recorded evidence, and deep health reports zero dead letters. No
+user repository has been modernized with this release yet. Human PR approval
+remains mandatory.
+
 ## Release gates
 
 A production release is permitted only when all of these gates pass:

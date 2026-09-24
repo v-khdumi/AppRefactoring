@@ -7,6 +7,41 @@ import { readVerificationSnapshot } from "./github-app";
 import { changesetDigest, safeSnapshotPath, reportPassed, type VerificationChange, type VerificationReport } from "./verification-evidence";
 import { verificationDescription } from "./verification-status";
 import { applyBaselineTestHarness } from "./baseline-test-harness";
+import { requiresWindowsVerifier } from "./verification-ecosystems";
+
+export const windowsVerifierImage="mcr.microsoft.com/dotnet/framework/sdk@sha256:a78c7a33d5a6ec45c5c05dc78461f4c0797eef4ee44a71ec67f988fe91834b19";
+const windowsBootstrap="$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;New-Item -ItemType Directory C:\\modernize -Force|Out-Null;Invoke-WebRequest -UseBasicParsing -Uri ($env:VERIFICATION_ENDPOINT+'?script=windows') -Headers @{Authorization='Bearer '+$env:VERIFICATION_TOKEN} -OutFile C:\\modernize\\supervisor.ps1;& C:\\modernize\\supervisor.ps1";
+export function windowsContainerGroupId(jobId:string){
+  const group=env.VERIFICATION_JOB_RESOURCE_ID?.match(/^(\/subscriptions\/[^/]+\/resourceGroups\/[^/]+)\//i)?.[1];
+  if(!group)throw new Error("The verification resource group is not configured.");
+  return `${group}/providers/Microsoft.ContainerInstance/containerGroups/mz-winverify-${jobId.replace(/-/g,"").slice(0,24)}`;
+}
+async function managementToken(){return (await new ManagedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
+async function dispatchWindowsVerification(prepared:{id:string;token:string}){
+  const access=await managementToken();
+  const job=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${access}`},signal:AbortSignal.timeout(60000)});
+  if(!job.ok)throw new Error(`Verification location lookup failed (${job.status}).`);
+  const location=((await job.json()) as {location:string}).location;
+  const response=await fetch(`https://management.azure.com${windowsContainerGroupId(prepared.id)}?api-version=2023-05-01`,{method:"PUT",headers:{Authorization:`Bearer ${access}`,"Content-Type":"application/json"},signal:AbortSignal.timeout(60000),body:JSON.stringify({location,tags:{"modernize-verification":prepared.id},properties:{osType:"Windows",restartPolicy:"Never",containers:[{name:"verifier",properties:{image:windowsVerifierImage,resources:{requests:{cpu:4,memoryInGB:8}},command:["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-Command",windowsBootstrap],environmentVariables:[{name:"VERIFICATION_ENDPOINT",value:`${env.VERIFICATION_PUBLIC_ORIGIN}/api/verification-jobs/${prepared.id}`},{name:"VERIFICATION_TOKEN",secureValue:prepared.token}]}}]}})});
+  if(!response.ok)throw new Error(`Windows verifier dispatch failed (${response.status}).`);
+}
+export async function deleteWindowsVerifier(jobId:string){
+  const response=await fetch(`https://management.azure.com${windowsContainerGroupId(jobId)}?api-version=2023-05-01`,{method:"DELETE",headers:{Authorization:`Bearer ${await managementToken()}`},signal:AbortSignal.timeout(60000)});
+  if(!response.ok&&response.status!==404&&response.status!==204)throw new Error(`Windows verifier cleanup failed (${response.status}).`);
+}
+export async function cleanupWindowsVerifiers(){
+  const group=env.VERIFICATION_JOB_RESOURCE_ID?.match(/^(\/subscriptions\/[^/]+\/resourceGroups\/[^/]+)\//i)?.[1];
+  if(!group)return;
+  const response=await fetch(`https://management.azure.com${group}/providers/Microsoft.ContainerInstance/containerGroups?api-version=2023-05-01`,{headers:{Authorization:`Bearer ${await managementToken()}`},signal:AbortSignal.timeout(60000)});
+  if(!response.ok)throw new Error(`Windows verifier inventory failed (${response.status}).`);
+  const groups=((await response.json()) as {value?:Array<{name:string;tags?:Record<string,string>}>}).value||[];
+  for(const item of groups){
+    const jobId=item.tags?.["modernize-verification"];
+    if(!jobId||!/^[0-9a-f-]{36}$/i.test(jobId)||item.name!==windowsContainerGroupId(jobId).split("/").pop())continue;
+    const active=await query("SELECT 1 FROM verification_jobs WHERE id=$1 AND status IN ('preparing','running') AND expires_at>now()",[jobId]);
+    if(!active.rowCount)await deleteWindowsVerifier(jobId).catch(error=>console.error("Windows verifier cleanup failed",error instanceof Error?error.message:error));
+  }
+}
 
 export async function currentChanges(client:Pick<PoolClient,"query">,runId:string) {
   const result=await client.query<{path:string;old_path:string|null;operation:string;after_content:string|null}>("SELECT path,old_path,operation,after_content FROM transformation_changes WHERE run_id=$1 ORDER BY path",[runId]);
@@ -66,8 +101,10 @@ export async function dispatchVerification(prepared:Awaited<ReturnType<typeof pr
     const candidate=applyVerificationChanges(source,prepared.changes);
     const baseline=applyBaselineTestHarness(source,candidate);
     const baselinePreparationPaths=baseline.filter(file=>/(^|\/)package\.json$/.test(file.path)&&source.find(original=>original.path===file.path)?.content!==file.content).map(file=>file.path.replace(/package\.json$/,"package-lock.json"));
-    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,sourceLockfiles:source.filter(file=>/(^|\/)(package-lock\.json|go\.mod|go\.sum|composer\.lock)$/.test(file.path))})]);
+    const windows=requiresWindowsVerifier(baseline)||requiresWindowsVerifier(candidate);
+    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,windows,sourceLockfiles:source.filter(file=>/(^|\/)(package-lock\.json|go\.mod|go\.sum|composer\.lock)$/.test(file.path))})]);
     if(!claimed.rowCount)return;
+    if(windows){await dispatchWindowsVerification(prepared);return;}
     const credential=new ManagedIdentityCredential();
     const access=await credential.getToken("https://management.azure.com/.default");
     const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}/start?api-version=2024-03-01`,{

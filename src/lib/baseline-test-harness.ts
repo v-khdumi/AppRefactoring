@@ -1,9 +1,24 @@
 import { safeSnapshotPath } from "./verification-evidence";
-import { ecosystemUnits, isDotnetTestProject, dotnetProject } from "./verification-ecosystems";
+import { ecosystemUnits, isDotnetTestProject, dotnetProject, dotnetFrameworkMoniker } from "./verification-ecosystems";
 
 type SnapshotFile={path:string;content:string;executable:boolean};
 const directoryOf=(path:string)=>path.includes("/")?path.slice(0,path.lastIndexOf("/")):".";
 const withinUnit=(project:string,path:string)=>project==="."||path.startsWith(`${project}/`);
+const decode=(file:SnapshotFile)=>Buffer.from(file.content,"base64").toString("utf8");
+function resolveRelative(from:string,reference:string){
+  const parts=directoryOf(from)==="."?[]:directoryOf(from).split("/");
+  for(const part of reference.replace(/\\/g,"/").split("/")){if(part==="..")parts.pop();else if(part&&part!==".")parts.push(part);}
+  return parts.join("/");
+}
+function retargetCharacterizationProject(project:SnapshotFile,baseline:SnapshotFile[]){
+  const content=decode(project);
+  const frameworks=[...content.matchAll(/<ProjectReference\s+Include="([^"]+)"/gi)].map(match=>baseline.find(file=>file.path===resolveRelative(project.path,match[1]))).filter((file):file is SnapshotFile=>Boolean(file)).map(file=>dotnetFrameworkMoniker(decode(file))).filter((value):value is string=>Boolean(value));
+  const target=frameworks.find(value=>/^net[1-4]\d{1,2}$/.test(value))||frameworks[0];
+  if(!target)return project;
+  let retargeted=content.replace(/<TargetFrameworks?>[^<]*<\/TargetFrameworks?>/i,`<TargetFramework>${target}</TargetFramework>`);
+  if(/^net[1-4]\d{1,2}$/.test(target)&&!/<LangVersion>/i.test(retargeted))retargeted=retargeted.replace(/<\/TargetFramework>/i,"</TargetFramework>\n    <LangVersion>latest</LangVersion>");
+  return {...project,content:Buffer.from(retargeted).toString("base64")};
+}
 function additiveEcosystemTests(files:Map<string,SnapshotFile>,baseline:SnapshotFile[],candidate:SnapshotFile[]){
   const original=new Set(baseline.map(file=>file.path));
   const originalDirectories=new Set(baseline.map(file=>directoryOf(file.path)));
@@ -27,7 +42,8 @@ function additiveEcosystemTests(files:Map<string,SnapshotFile>,baseline:Snapshot
       for(const project of additions.filter(file=>dotnetProject.test(file.path)&&isDotnetTestProject(Buffer.from(file.content,"base64").toString("utf8")))){
         const directory=directoryOf(project.path);
         if(directory==="."||originalDirectories.has(directory)||!characterization(directory))continue;
-        additions.filter(file=>file.path.startsWith(`${directory}/`)).forEach(add);
+        additions.filter(file=>file.path.startsWith(`${directory}/`)&&file.path!==project.path).forEach(add);
+        add(retargetCharacterizationProject(project,baseline));
       }
     }
   }
