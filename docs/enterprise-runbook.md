@@ -97,6 +97,11 @@ completed with recorded evidence, and deep health reports zero dead letters. No
 user repository has been modernized with this release yet. Human PR approval
 remains mandatory.
 
+On 2026-09-24 the operator excluded dedicated verifier egress isolation and
+adversarial testing, backup/DR exercises, load/soak testing, independent approval
+and the dedicated canary repository from this pilot. They remain open for any
+external-tenant or certified production release.
+
 ## Release gates
 
 A production release is permitted only when all of these gates pass:
