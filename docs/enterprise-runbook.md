@@ -124,7 +124,13 @@ Create a protected `production` environment with required reviewers and these se
 - `AZURE_SUBSCRIPTION_ID`: production subscription.
 - `HEALTH_CHECK_TOKEN`: random value of at least 32 characters matching Key Vault.
 
-Set `AZURE_LOCATION` and `AZURE_RESOURCE_GROUP` as environment variables. Protect `main`, require the Quality gates, CodeQL, and Container security checks, require review, and disallow force pushes.
+Set `AZURE_LOCATION` and `AZURE_RESOURCE_GROUP` as environment variables. The resource
+group must already be provisioned; the workflow restores its `azd` outputs before
+deployment, including the Entra API application IDs used by the browser build.
+The federated deployment identity (`AZURE_CLIENT_ID` in GitHub secrets) is distinct
+from the runtime API application and user-assigned managed identity.
+Protect `main`, require the Quality gates, CodeQL, and Container security checks,
+require review, and disallow force pushes.
 
 ## Required Azure configuration
 
@@ -145,11 +151,25 @@ For a controlled manual release:
 ```powershell
 azd auth login
 azd provision --no-prompt
-az containerapp job start --name (azd env get-value MIGRATION_JOB_NAME) --resource-group (azd env get-value AZURE_RESOURCE_GROUP)
-azd deploy --all --no-prompt
+azd deploy worker --no-prompt
+$group = azd env get-value AZURE_RESOURCE_GROUP
+$worker = azd env get-value SERVICE_WORKER_NAME
+$image = az containerapp show --name $worker --resource-group $group --query "properties.template.containers[0].image" --output tsv
+bash scripts/deploy-migrations.sh $group (azd env get-value MIGRATION_JOB_NAME) $image
+if ($LASTEXITCODE -ne 0) { throw "Database migration release gate failed." }
+azd deploy outbox --no-prompt
+azd deploy web --no-prompt
 ```
 
-After deployment, validate shallow and authenticated deep health. Never log the health token.
+The migration gate updates the job image to the release worker image, starts a
+specific execution, and fails on an unsuccessful, unexpected, or timed-out result.
+Starting a job is not evidence that migrations completed.
+
+After deployment, validate shallow and authenticated deep health. Never log the
+health token. Deep health returns HTTP 503 for missing, stale, starting, stopping,
+or degraded required workers, queue failures, and nonzero dead letters.
+Use `/api/health/live` only for restart probes: it deliberately ignores external
+dependencies, while `/api/health` is the readiness gate.
 
 ## Rollback
 

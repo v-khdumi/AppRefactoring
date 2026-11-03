@@ -23,6 +23,7 @@ param githubAppPrivateKey string
 @secure()
 param githubWebhookSecret string
 @secure()
+@minLength(32)
 param healthCheckToken string
 @description('Operations mailbox that receives production alerts.')
 param operationsEmail string
@@ -403,6 +404,16 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
+module verification 'verification.bicep' = {
+  name: '${prefix}-verification'
+  params: {
+    location: location
+    jobName: '${prefix}-verify'
+    environmentId: environment.id
+    starterPrincipalIds: [identity.properties.principalId]
+  }
+}
+
 var registryConfiguration = [
   {
     server: registry.properties.loginServer
@@ -519,6 +530,7 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'NODE_ENV', value: 'production' }
             { name: 'DEMO_MODE', value: 'false' }
             { name: 'SERVICE_NAME', value: 'modernize-web' }
+            { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'AZURE_SERVICE_BUS_NAMESPACE', value: '${serviceBus.name}.servicebus.windows.net' }
             { name: 'AZURE_SERVICE_BUS_QUEUE', value: queue.name }
@@ -533,12 +545,14 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook' }
             { name: 'HEALTH_CHECK_TOKEN', secretRef: 'health-token' }
+            { name: 'VERIFICATION_JOB_RESOURCE_ID', value: verification.outputs.jobResourceId }
+            { name: 'VERIFICATION_PUBLIC_ORIGIN', value: 'https://${prefix}-web.${environment.properties.defaultDomain}' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
             { name: 'KEY_VAULT_URL', value: vault.properties.vaultUri }
           ]
           probes: [
-            { type: 'Liveness', httpGet: { path: '/api/health', port: 3000 }, initialDelaySeconds: 20, periodSeconds: 30 }
-            { type: 'Readiness', httpGet: { path: '/api/health', port: 3000 }, initialDelaySeconds: 5, periodSeconds: 10 }
+            { type: 'Liveness', httpGet: { path: '/api/health/live', port: 3000 }, initialDelaySeconds: 20, periodSeconds: 30, timeoutSeconds: 2 }
+            { type: 'Readiness', httpGet: { path: '/api/health', port: 3000 }, initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 10 }
           ]
         }
       ]
@@ -594,6 +608,7 @@ resource transformationWorker 'Microsoft.App/containerApps@2025-02-02-preview' =
             { name: 'NODE_ENV', value: 'production' }
             { name: 'DEMO_MODE', value: 'false' }
             { name: 'SERVICE_NAME', value: 'modernize-worker' }
+            { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'AZURE_SERVICE_BUS_NAMESPACE', value: '${serviceBus.name}.servicebus.windows.net' }
             { name: 'AZURE_SERVICE_BUS_QUEUE', value: queue.name }
@@ -602,6 +617,8 @@ resource transformationWorker 'Microsoft.App/containerApps@2025-02-02-preview' =
             { name: 'AZURE_AI_FOUNDRY_MODEL', value: foundryModel }
             { name: 'GITHUB_APP_ID', value: githubAppId }
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
+            { name: 'VERIFICATION_JOB_RESOURCE_ID', value: verification.outputs.jobResourceId }
+            { name: 'VERIFICATION_PUBLIC_ORIGIN', value: 'https://${prefix}-web.${environment.properties.defaultDomain}' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
           ]
         }
@@ -693,3 +710,6 @@ output SERVICE_WEB_URI string = 'https://${app.properties.configuration.ingress.
 output SERVICE_WORKER_NAME string = transformationWorker.name
 output SERVICE_OUTBOX_NAME string = outboxWorker.name
 output MIGRATION_JOB_NAME string = migrationJob.name
+output VERIFICATION_JOB_RESOURCE_ID string = verification.outputs.jobResourceId
+output AZURE_TENANT_ID string = entraTenantId
+output AZURE_CLIENT_ID string = entraClientId

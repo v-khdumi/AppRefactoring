@@ -39,6 +39,11 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     environment: production
+    env:
+      AZURE_ENV_NAME: production
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v2
@@ -48,6 +53,10 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - uses: Azure/setup-azd@v2
       - run: azd auth login --client-id "${{ secrets.AZURE_CLIENT_ID }}" --federated-credential-provider github --tenant-id "${{ secrets.AZURE_TENANT_ID }}"
+      - name: Restore provisioned environment outputs
+        run: |
+          azd env new production --no-prompt
+          azd env refresh --no-prompt
       - name: Deploy migration-capable worker
         run: azd deploy worker --no-prompt
         env:
@@ -55,7 +64,11 @@ jobs:
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
           AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       - name: Run database migration job
-        run: az containerapp job start --name "$(azd env get-value MIGRATION_JOB_NAME)" --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"
+        shell: bash
+        run: |
+          worker="$(azd env get-value SERVICE_WORKER_NAME)"
+          image="$(az containerapp show --name "$worker" --resource-group "$AZURE_RESOURCE_GROUP" --query "properties.template.containers[0].image" --output tsv)"
+          bash scripts/deploy-migrations.sh "$AZURE_RESOURCE_GROUP" "$(azd env get-value MIGRATION_JOB_NAME)" "$image"
       - name: Deploy outbox
         run: azd deploy outbox --no-prompt
         env:

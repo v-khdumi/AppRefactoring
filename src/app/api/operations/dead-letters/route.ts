@@ -1,4 +1,4 @@
-import { ManagedIdentityCredential } from "@azure/identity";
+import { managedIdentityCredential } from "@/lib/azure-identity";
 import { ServiceBusClient } from "@azure/service-bus";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -9,7 +9,7 @@ import { env, serviceBusNamespace } from "@/lib/env";
 
 const replaySchema=z.object({messageIds:z.array(z.string().min(1).max(200)).min(1).max(20)});
 
-function client(){const namespace=serviceBusNamespace();if(!namespace)throw new Error("Service Bus namespace is not configured.");return new ServiceBusClient(namespace,new ManagedIdentityCredential());}
+function client(){const namespace=serviceBusNamespace();if(namespace)return new ServiceBusClient(namespace,managedIdentityCredential());if(env.AZURE_SERVICE_BUS_CONNECTION_STRING)return new ServiceBusClient(env.AZURE_SERVICE_BUS_CONNECTION_STRING);throw new Error("Service Bus is not configured.");}
 
 export async function GET(request:Request){
   try{
