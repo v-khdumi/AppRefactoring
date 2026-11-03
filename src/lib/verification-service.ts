@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { ManagedIdentityCredential } from "@azure/identity";
+import { managedIdentityCredential } from "./azure-identity";
 import type { PoolClient } from "pg";
 import { query, transaction } from "./db";
 import { env } from "./env";
@@ -16,7 +16,7 @@ export function windowsContainerGroupId(jobId:string){
   if(!group)throw new Error("The verification resource group is not configured.");
   return `${group}/providers/Microsoft.ContainerInstance/containerGroups/mz-winverify-${jobId.replace(/-/g,"").slice(0,24)}`;
 }
-async function managementToken(){return (await new ManagedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
+async function managementToken(){return (await managedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
 async function dispatchWindowsVerification(prepared:{id:string;token:string}){
   const access=await managementToken();
   const job=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${access}`},signal:AbortSignal.timeout(60000)});
@@ -105,7 +105,7 @@ export async function dispatchVerification(prepared:Awaited<ReturnType<typeof pr
     const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,windows,sourceLockfiles:source.filter(file=>/(^|\/)(package-lock\.json|go\.mod|go\.sum|composer\.lock)$/.test(file.path))})]);
     if(!claimed.rowCount)return;
     if(windows){await dispatchWindowsVerification(prepared);return;}
-    const credential=new ManagedIdentityCredential();
+    const credential=managedIdentityCredential();
     const access=await credential.getToken("https://management.azure.com/.default");
     const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}/start?api-version=2024-03-01`,{
       method:"POST",headers:{Authorization:`Bearer ${access.token}`,"Content-Type":"application/json"},signal:AbortSignal.timeout(60000),

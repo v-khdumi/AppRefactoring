@@ -25,14 +25,17 @@ ModernizeAI is an engineering control center for analyzing and incrementally mod
 
 ## Run locally
 
-Requirements: Node.js 20 or newer and npm 10 or newer.
+Requirements: Node.js 22 or 24 and npm 10 or newer.
 
 1. Copy `.env.example` to `.env.local`.
-2. Run `npm install`.
+2. Run `npm ci`.
 3. Run `npm run dev`.
 4. Open `http://127.0.0.1:3000`.
 
 Demo behavior is opt-in. Set `DEMO_MODE=true` only in an isolated demonstration environment; missing production integrations fail closed.
+
+Manrope is bundled from `@fontsource-variable/manrope`; builds and browsers do not
+need access to Google Fonts.
 
 ## Microsoft Foundry
 
@@ -74,6 +77,7 @@ Real repository writes use the GitHub App, short-lived installation tokens, comm
 ## API routes
 
 - `GET /api/health` — service status and demo/live mode.
+- `GET /api/health/live` — dependency-free process liveness; use this for restart probes.
 - `POST /api/repositories/inspect` — read-only repository inspection.
 - `POST /api/analysis` — demo or live Microsoft Foundry architecture analysis.
 - `GET|POST /api/transformations` — tenant-scoped durable transformation runs.
@@ -100,7 +104,20 @@ Real repository writes use the GitHub App, short-lived installation tokens, comm
 - Approval-gated OIDC production deployment, CodeQL, container vulnerability scanning, deterministic builds, and dependency auditing.
 - Microsoft Entra browser sign-in with silent token acquisition and role-protected API calls.
 - Content Security Policy and standard browser security headers.
-- Zero known production dependency vulnerabilities at the latest local audit.
+- Production dependency auditing enforced by CI; rerun the audit for every release.
+
+Readiness validates required production configuration and database migrations.
+Protected deep health (`/api/health?deep=true`) additionally requires fresh,
+healthy `transformation` and `outbox` heartbeats and an available queue with zero
+dead letters; degraded checks return HTTP 503. Dependency failures do not fail
+the separate liveness endpoint and therefore do not trigger restart loops.
+
+The production template provisions and connects the isolated Linux verification
+job. `VERIFICATION_JOB_RESOURCE_ID` and `VERIFICATION_PUBLIC_ORIGIN` are required
+for live production readiness. `AZURE_MANAGED_IDENTITY_CLIENT_ID` selects the
+user-assigned runtime identity; `AZURE_CLIENT_ID` remains the Entra API audience.
+An explicit Service Bus namespace uses managed identity, while a connection string
+is used only when no namespace is set.
 
 ## Go-live sequence
 

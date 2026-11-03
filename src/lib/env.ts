@@ -11,6 +11,7 @@ const schema = z.object({
   AZURE_SERVICE_BUS_QUEUE: z.string().default("modernization-runs"),
   AZURE_TENANT_ID: z.string().uuid().optional(),
   AZURE_CLIENT_ID: z.string().uuid().optional(),
+  AZURE_MANAGED_IDENTITY_CLIENT_ID: z.string().uuid().optional(),
   AZURE_AI_FOUNDRY_ENDPOINT: optionalUrl,
   AZURE_AI_FOUNDRY_API_KEY: z.string().optional(),
   AZURE_AI_FOUNDRY_MODEL: z.string().default("gpt-6-astra"),
@@ -24,18 +25,29 @@ const schema = z.object({
   VERIFICATION_PUBLIC_ORIGIN: optionalUrl,
 });
 
-export const env = schema.parse(process.env);
+export function parseEnvironment(values: NodeJS.ProcessEnv) {
+  return schema.parse(Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== ""),
+  ));
+}
+
+export const env = parseEnvironment(process.env);
 export const demoEnabled = env.DEMO_MODE === "true";
 export function serviceBusNamespaceFromConnectionString(connectionString?:string){return connectionString?.match(/Endpoint=sb:\/\/([^/;]+)/i)?.[1];}
-export function serviceBusNamespace(){return env.AZURE_SERVICE_BUS_NAMESPACE||serviceBusNamespaceFromConnectionString(env.AZURE_SERVICE_BUS_CONNECTION_STRING);}
+export function serviceBusNamespace(configuration = env){return configuration.AZURE_SERVICE_BUS_NAMESPACE;}
 
-export function assertProductionConfiguration() {
-  if (env.NODE_ENV !== "production" || demoEnabled) return;
+export function assertProductionConfiguration(configuration = env) {
+  if (configuration.NODE_ENV !== "production" || configuration.DEMO_MODE === "true") return;
   const required = [
     "DATABASE_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID",
     "AZURE_AI_FOUNDRY_ENDPOINT", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_WEBHOOK_SECRET", "HEALTH_CHECK_TOKEN",
+    "VERIFICATION_JOB_RESOURCE_ID", "VERIFICATION_PUBLIC_ORIGIN",
   ] as const;
-  const missing = required.filter((key) => !env[key]);
-  if(!serviceBusNamespace()&&!env.AZURE_SERVICE_BUS_CONNECTION_STRING)missing.push("AZURE_SERVICE_BUS_NAMESPACE" as typeof missing[number]);
+  const missing: string[] = required.filter((key) => !configuration[key]);
+  if (!configuration.AZURE_SERVICE_BUS_NAMESPACE && !configuration.AZURE_SERVICE_BUS_CONNECTION_STRING) missing.push("AZURE_SERVICE_BUS_NAMESPACE");
   if (missing.length) throw new Error(`Missing production configuration: ${missing.join(", ")}`);
+  if (!configuration.AZURE_AI_FOUNDRY_ENDPOINT?.startsWith("https://") || !configuration.VERIFICATION_PUBLIC_ORIGIN?.startsWith("https://")) {
+    throw new Error("Production Foundry and verification endpoints must use HTTPS.");
+  }
 }

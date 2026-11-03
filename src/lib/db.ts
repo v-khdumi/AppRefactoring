@@ -1,18 +1,23 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { env } from "@/lib/env";
+import { logEvent } from "@/lib/structured-log";
 
 const globalPool = globalThis as typeof globalThis & { modernizePool?: Pool };
 
 export function database() {
   if (!env.DATABASE_URL) throw new Error("DATABASE_URL is not configured.");
-  globalPool.modernizePool ||= new Pool({
-    connectionString: env.DATABASE_URL,
-    max: 15,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 5_000,
-    ssl: env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined,
-    application_name: "modernize-ai",
-  });
+  if (!globalPool.modernizePool) {
+    const pool = new Pool({
+      connectionString: env.DATABASE_URL,
+      max: 15,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+      ssl: env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined,
+      application_name: "modernize-ai",
+    });
+    pool.on("error", error => logEvent("error", "database.idle_client_error", { error }));
+    globalPool.modernizePool = pool;
+  }
   return globalPool.modernizePool;
 }
 

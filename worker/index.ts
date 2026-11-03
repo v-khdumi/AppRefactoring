@@ -1,6 +1,6 @@
 import { ServiceBusClient, type ServiceBusReceivedMessage } from "@azure/service-bus";
 import {randomUUID} from "node:crypto";
-import { ManagedIdentityCredential } from "@azure/identity";
+import { managedIdentityCredential } from "../src/lib/azure-identity";
 import { env, serviceBusNamespace } from "../src/lib/env";
 import { database, transaction } from "../src/lib/db";
 import { readInstalledRepository,readInstalledFile,readVerificationSnapshot } from "../src/lib/github-app";
@@ -149,7 +149,7 @@ function countAdded(before: string, after: string) {
 
 const namespace=serviceBusNamespace();
 if (!namespace&&!env.AZURE_SERVICE_BUS_CONNECTION_STRING) throw new Error("Azure Service Bus configuration is required.");
-const bus = namespace?new ServiceBusClient(namespace,new ManagedIdentityCredential()):new ServiceBusClient(env.AZURE_SERVICE_BUS_CONNECTION_STRING!);
+const bus = namespace?new ServiceBusClient(namespace,managedIdentityCredential()):new ServiceBusClient(env.AZURE_SERVICE_BUS_CONNECTION_STRING!);
 const receiver = bus.createReceiver(env.AZURE_SERVICE_BUS_QUEUE, { receiveMode: "peekLock", maxAutoLockRenewalDurationInMs: 60 * 60 * 1000 });
 const instanceId=process.env.HOSTNAME||`worker-${process.pid}`;
 let stopping=false;
