@@ -14,8 +14,8 @@ Before deployment:
 2. Create the Microsoft Entra API application and roles: `Modernization.Reader`, `Modernization.Admin`, and `Modernization.Approver`.
 3. Create and install a GitHub App with repository metadata, contents, and pull-request permissions.
 4. Store GitHub App credentials and webhook secret as Container App secrets or Key Vault references.
-   Additional source providers use the secure `sourceConnections` parameter;
-   never place credentials in browser build arguments or run options.
+   GitHub.com is the only source provider. Never place App credentials in browser
+   build arguments or run options.
 5. Deploy the template with organization-approved networking parameters; use private endpoints for regulated environments.
 6. Run `npm run db:migrate` as a one-off deployment job before directing traffic to the new revision.
 

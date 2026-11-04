@@ -147,6 +147,24 @@ C/C++ and COBOL compile/test canaries ran, but mandatory dependency audits found
 unrated or incomplete external evidence and blocked the candidates. These are
 open qualification items, not claims that arbitrary repositories can publish.
 
+### GitHub-only pilot release scope
+
+The operator subsequently restricted repository support to GitHub.com and
+authorized a pilot update in the existing `rg-demo`, not a new production
+environment. Other-provider adapters and service-token configuration have been
+removed from the server, UI and infrastructure. The authorized repository canary
+is `v-khdumi/transcript`, replacing the earlier `myNews` selection. Its source
+branch must remain unchanged, and independent approval cannot be substituted
+with a synthetic actor or a database update.
+
+The application images now share a refreshed immutable Node/Alpine base and
+apply available Alpine security updates in each stage. The dedicated Trivy
+execution `modernize-gate40f315b8-scan-d9q3frp` completed scans of all three
+candidate image digests successfully, including all vulnerability severities
+and secret scanning, retaining the existing `ignore-unfixed` policy. A final
+release must still be tied to the exact built/scanned digest. No canary or
+deployment success is implied until its corresponding evidence is recorded.
+
 ### GitHub integration validation
 
 The modernization expansion was integrated with the previously merged production

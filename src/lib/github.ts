@@ -3,9 +3,12 @@ import { resilientFetch } from "@/lib/resilient-fetch";
 const GITHUB_API = "https://api.github.com";
 
 export function parseGitHubUrl(url: string) {
-  const match = url.trim().match(/^https?:\/\/github\.com\/([^/]+)\/([^/#]+?)(?:\.git)?\/?$/i);
-  if (!match) throw new Error("The GitHub repository URL is invalid.");
-  return { owner: match[1], repo: match[2] };
+  let parsed:URL;
+  try{parsed=new URL(url.trim());}catch{throw new Error("Use an HTTPS GitHub repository URL: https://github.com/owner/repository.");}
+  if(parsed.origin!=="https://github.com"||parsed.username||parsed.password||parsed.search||parsed.hash)throw new Error("Only HTTPS github.com repository URLs without credentials, queries or fragments are supported.");
+  const parts=parsed.pathname.replace(/\/$/,"").replace(/\.git$/,"").split("/");
+  if(parts.length!==3||!parts[1]||!parts[2]||!parts.slice(1).every(part=>/^[A-Za-z0-9_.-]+$/.test(part)&&![".",".."].includes(part)))throw new Error("The GitHub repository URL must identify exactly an owner and repository.");
+  return {owner:parts[1],repo:parts[2]};
 }
 
 function headers(token?: string): HeadersInit {

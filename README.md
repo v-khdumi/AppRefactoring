@@ -4,7 +4,7 @@ ModernizeAI is an engineering control center for analyzing and incrementally mod
 
 ## Product capabilities
 
-- GitHub App access and server-managed GitHub Enterprise, GitLab, Azure Repos and Bitbucket Cloud adapters. See [source connections and qualification](docs/source-providers.md).
+- GitHub.com repositories accessed through the installed GitHub App. See [GitHub access and qualification](docs/source-providers.md).
 - Frontend, backend, or full-stack modernization scope.
 - Explicit upgrade, refactor, replatform, service extraction, cross-runtime rewrite, database migration and AI strategies with scenario-specific acceptance prerequisites.
 - Target language and framework selection.
@@ -40,7 +40,7 @@ unexecuted, skipped or unverifiable checks.
 | C/C++ | CMake/system-dependency profile implemented; real compilation/CTest ran, but native audit findings block current qualification; Conan/vcpkg/Meson/MSVC are not silently accepted |
 | COBOL | GnuCOBOL executable-contract profile implemented; real compilation/tests ran, but current native audit evidence blocks qualification |
 | Mixed .NET Framework + frontend | Executor implemented for npm; live Azure infrastructure prevented qualification, so admission remains blocked |
-| GitHub Enterprise/GitLab/Azure Repos/Bitbucket | Adapters and HTTP contract tests implemented; authenticated canaries explicitly pending operator-configured service access |
+| GitHub.com | GitHub App pinned snapshots, isolated branches and draft PRs; a dedicated authenticated repository canary is required for release |
 | Specialized strategies | Require real, source/digest-bound acceptance harnesses; Windows strategy execution is not qualified |
 
 Review [the verifier matrix](docs/verification-runner.md), [strategy acceptance](docs/modernization-scenarios.md)
@@ -109,7 +109,7 @@ The Testing Agent is independent from implementation agents and is restricted to
 
 Delivery estimates are low-confidence planning heuristics, not measured commitments. They account for repository size, scope, findings, cloud/AI additions, sequential generation, verification and human review. They do not assume parallel specialist speed-up.
 
-Real repository writes require source/digest-bound independent approval, a separate branch and a confirmed draft pull/merge request. GitHub uses short-lived App tokens; other providers use administrator-managed service connections. Direct writes to the source branch are prohibited. See [strategy acceptance](docs/modernization-scenarios.md).
+Real repository writes require source/digest-bound independent approval, a separate branch and a draft pull request. GitHub uses short-lived App tokens; other repository providers are not supported. Direct writes to the source branch are prohibited. See [strategy acceptance](docs/modernization-scenarios.md).
 
 ## API routes
 

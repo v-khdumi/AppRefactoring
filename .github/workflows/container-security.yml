@@ -41,6 +41,15 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '1'
+      - name: Report container scan findings
+        if: always()
+        env:
+          SARIF_FILE: trivy-${{ matrix.name }}.sarif
+        run: |
+          if [ -f "$SARIF_FILE" ]; then
+            jq -r '[.runs[].results[]?] | "Container scan findings: \(length)"' "$SARIF_FILE"
+            jq -r '.runs[].results[]? | .message.text' "$SARIF_FILE"
+          fi
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { AuthError, requireUser } from "@/lib/auth";
 import { isDemoRequest } from "@/lib/demo-session";
 import { inspectRepository, parseGitHubUrl, readRepositoryFile } from "@/lib/github";
-import {readSourceRepository,sourceRepository,SourceRequestError} from "@/lib/source-provider";
+import {readSourceRepository,sourceRepository} from "@/lib/source-provider";
 import { demoStackRecommendation, recommendStack } from "@/lib/stack-recommendation";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import {selectEvidenceFiles,repositoryEvidence} from "@/lib/repository-evidence";
@@ -25,7 +25,6 @@ export async function POST(request:Request){
       const repository=await readSourceRepository(input.url,input.branch);
       files=repository.files;readSource=repository.readFile;
     }catch(error){
-      if(descriptor.provider!=="github")throw error;
       console.warn("GitHub App read failed; checking public read-only access",error instanceof Error?error.message:error);
       const parsed=parseGitHubUrl(input.url);
       const repository=await inspectRepository(input.url,undefined,input.branch);
@@ -39,7 +38,6 @@ export async function POST(request:Request){
   }catch(error){
     if(error instanceof VerificationReadinessError)return NextResponse.json({error:error.message,code:error.name,readiness:error.readiness},{status:422});
     if(error instanceof AuthError||error instanceof ContentPolicyError)return NextResponse.json({error:error.message},{status:error.status});
-    if(error instanceof SourceRequestError)return NextResponse.json({error:error.message},{status:422});
     if(error instanceof z.ZodError)return NextResponse.json({error:"The repository URL, source connection or branch is invalid.",issues:error.issues},{status:400});
     console.error("Stack recommendation failed",error instanceof Error?error.message:error);
     return NextResponse.json({error:error instanceof Error?error.message:"The repository recommendation could not be prepared."},{status:503});

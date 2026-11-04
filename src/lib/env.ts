@@ -1,5 +1,4 @@
 import { z } from "zod";
-import {sourceConnections} from "./source-connections";
 
 const optionalUrl = z.string().url().optional().or(z.literal(""));
 
@@ -19,7 +18,6 @@ const schema = z.object({
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
-  SOURCE_CONNECTIONS:z.string().optional(),
   HEALTH_CHECK_TOKEN: z.string().min(32).optional(),
   NEXT_PUBLIC_GITHUB_APP_SLUG: z.string().default("modernizeai-khaled"),
   KEY_VAULT_URL: optionalUrl,
@@ -41,12 +39,9 @@ export function assertProductionConfiguration(configuration = env) {
     "DATABASE_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID",
     "AZURE_AI_FOUNDRY_ENDPOINT", "AZURE_AI_FOUNDRY_API_KEY",
     "VERIFICATION_JOB_RESOURCE_ID", "VERIFICATION_PUBLIC_ORIGIN", "HEALTH_CHECK_TOKEN",
+    "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_WEBHOOK_SECRET",
   ] as const;
   const missing: string[] = required.filter((key) => !configuration[key]);
-  const connections=sourceConnections(configuration.SOURCE_CONNECTIONS);
-  const githubConfigured=Boolean(configuration.GITHUB_APP_ID&&configuration.GITHUB_APP_PRIVATE_KEY);
-  if(!githubConfigured&&!connections.length)throw new Error("Configure a GitHub App or administrator-managed SOURCE_CONNECTIONS before serving live traffic.");
-  if(githubConfigured&&!configuration.GITHUB_WEBHOOK_SECRET)missing.push("GITHUB_WEBHOOK_SECRET");
   if (!configuration.AZURE_SERVICE_BUS_NAMESPACE && !configuration.AZURE_SERVICE_BUS_CONNECTION_STRING) missing.push("AZURE_SERVICE_BUS_NAMESPACE");
   if (missing.length) throw new Error(`Missing production configuration: ${missing.join(", ")}`);
   if (!configuration.AZURE_AI_FOUNDRY_ENDPOINT?.startsWith("https://") || !configuration.VERIFICATION_PUBLIC_ORIGIN?.startsWith("https://")) {

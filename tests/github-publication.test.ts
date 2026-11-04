@@ -22,7 +22,7 @@ test("matching existing branch and PR are recovered without overwriting or dupli
   if(path.endsWith("/git/trees"))return respond({sha:"approved-tree"});
   if(path.endsWith("/git/ref/heads/modernize%2Ftest"))return respond({object:{sha:"candidate"}});
   if(path.endsWith("/git/commits/candidate"))return respond({tree:{sha:"approved-tree"},parents:[{sha:"source"}]});
-  if(path.endsWith("/pulls"))return respond([{number:1,html_url:"https://github.com/owner/repo/pull/1"}]);
+  if(path.endsWith("/pulls"))return respond([{number:1,html_url:"https://github.com/owner/repo/pull/1",draft:true}]);
   throw new Error(`Unexpected GitHub request ${path}`);
  });
  assert.equal(await publishChanges(input),"candidate");
@@ -52,4 +52,17 @@ test("workflow-enabled token explicitly requests the granted permission and refu
 });
 test("source branch is never used as the publication target",async()=>{
  await assert.rejects(publishChanges({...input,targetBranch:"main"}),/never the source branch/);
+});
+test("publication cannot silently reuse or create a non-draft pull request",async context=>{
+ let existing=true;
+ context.mock.method(globalThis,"fetch",async(url:string,options:RequestInit={})=>{
+  const path=new URL(url).pathname;
+  if(path.endsWith("/installation"))return respond({id:1});
+  if(path.endsWith("/access_tokens"))return respond({token:"fixture"});
+  if(path.endsWith("/pulls"))return respond(options.method==="POST"?{number:1,html_url:"https://github.com/owner/repo/pull/1",draft:false}:existing?[{number:1,html_url:"https://github.com/owner/repo/pull/1",draft:false}]:[]);
+  throw new Error(`Unexpected request ${path}`);
+ });
+ await assert.rejects(createModernizationPullRequest({...input,title:"Title",body:"Body"}),/not a draft/);
+ existing=false;
+ await assert.rejects(createModernizationPullRequest({...input,title:"Title",body:"Body"}),/did not confirm/);
 });

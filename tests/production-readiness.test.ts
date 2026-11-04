@@ -46,10 +46,9 @@ test("production requires webhook, deep health and isolated verification configu
   }
 });
 
-test("non-GitHub production service connections do not require unused GitHub App credentials",()=>{
+test("GitHub App credentials remain mandatory and cannot be replaced by legacy provider settings",()=>{
   const configuration=parseEnvironment({...production,GITHUB_APP_ID:"",GITHUB_APP_PRIVATE_KEY:"",GITHUB_WEBHOOK_SECRET:"",SOURCE_CONNECTIONS:JSON.stringify([{provider:"gitlab",origin:"https://gitlab.example.test",token:"test-service-credential"}])});
-  assert.doesNotThrow(()=>assertProductionConfiguration(configuration));
-  assert.throws(()=>assertProductionConfiguration(parseEnvironment({...production,GITHUB_APP_ID:"",GITHUB_APP_PRIVATE_KEY:"",SOURCE_CONNECTIONS:"[]"})),/GitHub App or administrator-managed/);
+  assert.throws(()=>assertProductionConfiguration(configuration),/GITHUB_APP_ID.*GITHUB_APP_PRIVATE_KEY.*GITHUB_WEBHOOK_SECRET/);
 });
 
 test("connection string authentication is not replaced with managed identity", () => {

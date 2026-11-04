@@ -108,7 +108,7 @@ function LoginScreen({ onSignIn, onDemo }: { onSignIn: () => Promise<void>; onDe
         <div className="login-security"><ShieldCheck size={14}/>Live access protected by Microsoft Entra ID</div>
       </div>
     </section>
-    <footer className="login-footer"><span>© 2026 ModernizeAI</span><div><span><Github size={13}/>Source service connections</span><span><ShieldCheck size={13}/>Enterprise RBAC</span></div></footer>
+    <footer className="login-footer"><span>© 2026 ModernizeAI</span><div><span><Github size={13}/>GitHub App integration</span><span><ShieldCheck size={13}/>Enterprise RBAC</span></div></footer>
   </main>;
 }
 

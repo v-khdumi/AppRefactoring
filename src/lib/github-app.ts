@@ -86,12 +86,14 @@ export async function createModernizationPullRequest(input: {
   owner: string; repo: string; sourceBranch: string; targetBranch: string; title: string; body: string;
 }) {
   const token = await installationToken(input.owner, input.repo,false,true);
-  const existing=await github<Array<{number:number;html_url:string}>>(`/repos/${input.owner}/${input.repo}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.targetBranch}`)}&base=${encodeURIComponent(input.sourceBranch)}`,{},token);
-  if(existing.length)return existing[0];
-  return github<{ number: number; html_url: string }>(`/repos/${input.owner}/${input.repo}/pulls`, {
+  const existing=await github<Array<{number:number;html_url:string;draft:boolean}>>(`/repos/${input.owner}/${input.repo}/pulls?state=open&head=${encodeURIComponent(`${input.owner}:${input.targetBranch}`)}&base=${encodeURIComponent(input.sourceBranch)}`,{},token);
+  if(existing.length){if(!existing[0].draft)throw new Error("The matching pull request is not a draft. Publication requires independent review; its state was not changed.");return existing[0];}
+  const pullRequest=await github<{ number: number; html_url: string;draft:boolean }>(`/repos/${input.owner}/${input.repo}/pulls`, {
     method: "POST",
     body: JSON.stringify({ title: input.title, head: input.targetBranch, base: input.sourceBranch, body: input.body, draft: true }),
   }, token);
+  if(!pullRequest.draft)throw new Error("GitHub did not confirm a draft pull request. Publication requires investigation.");
+  return pullRequest;
 }
 
 export function verifyGitHubSignature(rawBody: string, signature: string | null) {
