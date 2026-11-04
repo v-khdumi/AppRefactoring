@@ -185,6 +185,45 @@ container scans because the old application cannot perform Managed Identity
 inference. The transcript canary must run immediately afterward; keep prior
 revision/image references for rollback and do not synthesize approval actors.
 
+### Pilot rollout evidence, 2026-11-04
+
+Code revision `2c4e8279d34d51c8366dc089fc5815a55d744053` is deployed to all three
+existing pilot apps. Their latest ready revisions are:
+
+- `modernize-demo-7pd4tn-web--r2c4e827`
+- `modernize-demo-7pd4tn-worker--r2c4e827`
+- `modernize-demo-7pd4tn-outbox--r2c4e827`
+
+GitHub Quality gates `41913997092`, CodeQL `41913997136` and Container security
+`41913997127` succeeded for that exact code revision. All 175 platform tests
+passed. ACR builds `ca4k`, `ca4n` and `ca4m` produced the deployed immutable
+web/worker/outbox digests; dedicated scan execution
+`modernize-gate40f315b8-scan-kjxo06t` passed all three images with the existing
+unfixed-finding policy, all severity levels and secret scanning.
+
+Before rollout, hashes proved the running migration script and all seven SQL
+files were byte-identical to the release. The concurrency-safe migrator then
+completed successfully. Prior ready image/revision references were retained.
+The deployment handled asynchronous Azure PATCH responses without assuming an
+empty HTTP response meant failure; actual latest-ready revisions were checked.
+
+After rollout, liveness, shallow readiness and authenticated deep readiness
+returned HTTP 200. Deep readiness confirmed both expected healthy fresh workers,
+zero active/dead-letter/scheduled queue messages and a reachable verifier.
+Webhook ingestion is explicitly disabled, visible in health/settings, and
+rejects deliveries with HTTP 503 as approved for this pilot. The temporary
+scanner job and its short-lived registry credentials were removed.
+
+The authenticated transcript canary run is
+`240a5a8a-fe71-42a9-befe-9b1ed0286765`, source SHA
+`2f91b4f0898b6c425bd28a6c528679e161dbbe3e`, target
+`modernize/canary-transcript-20261104-2c4e827`. Live analysis completed through
+Managed Identity, and generation/verification was started on the deployed
+release. At this record's creation, the original source branch was unchanged and
+no target branch or PR had been published. This is not a claim that the canary's
+verification or independent publication approval has passed; record its terminal
+outcome separately.
+
 ### GitHub integration validation
 
 The modernization expansion was integrated with the previously merged production
