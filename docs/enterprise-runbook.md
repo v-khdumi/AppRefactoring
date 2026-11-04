@@ -224,6 +224,31 @@ no target branch or PR had been published. This is not a claim that the canary's
 verification or independent publication approval has passed; record its terminal
 outcome separately.
 
+The canary subsequently reached `awaiting-approval`. Verification job
+`1831299c-237a-491c-a7cb-cd847014224c` passed against changeset digest
+`7cc0266085eb45852616b1fa092c7d8bd8f3979cb7ed7deba3179584d6e5c880`:
+25 unittest tests on each variant, plus 25 desktop integration/acceptance tests
+on each variant, all without failures or skips. Candidate dependency audit and
+the mandatory local Semgrep/credential scan passed.
+
+Earlier attempts were correctly blocked: the generated candidate retained the
+original vulnerable `python-dotenv==1.0.1`, and the acceptance harness used an
+unavailable `python` command, then omitted the virtual display required for Tk.
+Normal, real-user audited Security/Testing Agent refinements updated the
+candidate dependency to `1.2.2`, preserved strict original/candidate pin
+expectations and wired the actual GUI suite through Xvfb. No audit or test gate
+was skipped. The original baseline vulnerability remains a diagnostic, not a
+claim that the source dependencies are clean.
+
+The source `main` SHA remained
+`2f91b4f0898b6c425bd28a6c528679e161dbbe3e`, with no target branch or PR created.
+The initiating administrator's approval access is correctly denied. Publication
+requires a real independent reviewer; no approval identity was invented and no
+source writes or automatic merge were performed. Passing mocked Speech-service
+contracts and headless GUI tests do not establish live microphone/Azure Speech
+integration. All pilot revisions remain ready, and only the permanent isolated
+verifier job remains after temporary scanner cleanup.
+
 ### GitHub integration validation
 
 The modernization expansion was integrated with the previously merged production
