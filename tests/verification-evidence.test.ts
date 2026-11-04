@@ -11,12 +11,15 @@ test("verification is bound to source, content, operations and paths",()=>{
 });
 test("only actual complete baseline and candidate command evidence passes",()=>{
  const commands=["npm ci --ignore-scripts --no-fund","npm run build","npm test -- --run","npm audit --omit=dev --audit-level=high"];
- const report:VerificationReport={status:"passed",reason:"",steps:(["baseline","candidate"] as const).flatMap(variant=>commands.map(command=>({variant,project:".",command,exitCode:0,timedOut:false,log:"",durationMs:10})))};
+ const report:VerificationReport={status:"passed",reason:"",steps:(["baseline","candidate"] as const).flatMap(variant=>commands.map(command=>({variant,project:".",command,exitCode:0,timedOut:false,log:"",durationMs:10,tests:command===commands[2]?{tests:2,failed:0,skipped:0}:undefined})))};
  assert.ok(reportPassed(report));
  assert.equal(reportPassed({...report,steps:report.steps.slice(1)}),false);
  assert.equal(reportPassed({...report,steps:[]}),false);
  assert.equal(reportPassed({...report,steps:report.steps.map((step,index)=>index?step:{...step,exitCode:1})}),false);
  assert.equal(reportPassed({...report,steps:report.steps.map((step,index)=>index?step:{...step,timedOut:true})}),false);
+ for(const tests of [undefined,{tests:0,failed:0,skipped:0},{tests:2,failed:0,skipped:1},{tests:2,failed:1,skipped:0}]){
+   assert.equal(reportPassed({...report,steps:report.steps.map(step=>step.command===commands[2]?{...step,tests}:step)}),false);
+ }
 });
 test("snapshot paths cannot escape or write repository metadata",()=>{
  for(const path of ["../escape","/root/file","C:/file","src/../file",".git/config","node_modules/hook","src\\file"])assert.equal(safeSnapshotPath(path),false);
@@ -25,7 +28,7 @@ test("snapshot paths cannot escape or write repository metadata",()=>{
 
 test("baseline vulnerabilities are diagnostic but candidate vulnerabilities and audit errors block",()=>{
  const commands=["npm ci --ignore-scripts --no-fund","npm run build","npm test -- --run","npm audit --omit=dev --audit-level=high"];
- const report:VerificationReport={status:"passed",reason:"",steps:(["baseline","candidate"] as const).flatMap(variant=>commands.map(command=>({variant,project:".",command,exitCode:0,timedOut:false,log:"",durationMs:1})))};
+ const report:VerificationReport={status:"passed",reason:"",steps:(["baseline","candidate"] as const).flatMap(variant=>commands.map(command=>({variant,project:".",command,exitCode:0,timedOut:false,log:"",durationMs:1,tests:command===commands[2]?{tests:2,failed:0,skipped:0}:undefined})))};
  const audit=report.steps[3];audit.exitCode=1;audit.log="# npm audit report\npackage\nSeverity: high\n1 high severity vulnerability";
  assert.equal(reportPassed(report),true);
  report.steps[7]={...audit,variant:"candidate"};assert.equal(reportPassed(report),false);

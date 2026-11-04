@@ -5,7 +5,7 @@ import {useModernizeAuth} from "@/components/auth-provider";
 import {requestJson} from "@/lib/request-json";
 import type {PublicationAccess as Access} from "@/lib/publication-access";
 
-export function PublicationAccess({runId,onRetry}:{runId:string;onRetry:()=>void}){
+export function PublicationAccess({runId,onRetry,canRetry}:{runId:string;onRetry:()=>void;canRetry:boolean}){
   const {authorizedFetch}=useModernizeAuth();
   const [access,setAccess]=useState<Access|null>(null);
   const [error,setError]=useState("");
@@ -27,7 +27,7 @@ export function PublicationAccess({runId,onRetry}:{runId:string;onRetry:()=>void
     <div className="journey-buttons">
       {access&&!access.ready&&<><a className="secondary-button" href={access.appSettingsUrl} target="_blank" rel="noreferrer">App permissions<ExternalLink size={14}/></a><a className="secondary-button" href={access.installationSettingsUrl} target="_blank" rel="noreferrer">Installation permissions<ExternalLink size={14}/></a></>}
       <button className="secondary-button" disabled={checking} onClick={()=>setRevision(value=>value+1)}><RefreshCw size={15} className={checking?"spin":""}/>Check permissions</button>
-      <button className="primary-button" disabled={checking||!access?.ready} onClick={onRetry}><RefreshCw size={15}/>Retry publication</button>
+      <button className="primary-button" disabled={checking||!access?.ready||!canRetry} title={canRetry?"Retry approved publication":"Administrator role required"} onClick={onRetry}><RefreshCw size={15}/>Retry publication</button>
     </div>
   </div>;
 }

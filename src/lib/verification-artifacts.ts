@@ -1,7 +1,8 @@
 import {z} from "zod";
 import type {PoolClient} from "pg";
 import {changesetDigest,safeSnapshotPath} from "./verification-evidence";
-import {currentChanges} from "./verification-service";
+import {currentChanges} from "./verification-record";
+import {nodeManager,pythonUnits} from "./verification-ecosystems";
 
 type File={path:string;content:string;executable?:boolean};
 export interface ArtifactSnapshot {baseline:File[];candidate:File[];sourceLockfiles:File[];baselinePreparationPaths?:string[];preparationComplete?:boolean}
@@ -13,6 +14,34 @@ export function validatePreparedLocks(snapshot:ArtifactSnapshot,files:PreparedFi
   preparedFilesSchema.parse(files);
   if(new Set(files.map(file=>`${file.variant}:${file.path}`)).size!==files.length)throw new Error("Duplicate prepared artifact paths.");
   for(const file of files){
+    if(/(^|\/)(pnpm-lock\.yaml|yarn\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Cargo\.lock|Gemfile\.lock)$/.test(file.path)){
+      if(file.variant==="baseline")throw new Error("Original manager-owned baseline locks cannot be replaced.");
+      const directory=file.path.includes("/")?file.path.slice(0,file.path.lastIndexOf("/")):".";
+      const local=(name:string)=>directory==="."?name:`${directory}/${name}`;
+      const paths=snapshot.candidate.map(item=>item.path);
+      if(/(pnpm-lock\.yaml|yarn\.lock)$/.test(file.path)){
+        const source=snapshot.candidate.find(item=>item.path===local("package.json"));
+        if(!source)throw new Error("Prepared JavaScript lock has no manifest.");
+        const manager=nodeManager(JSON.parse(Buffer.from(source.content,"base64").toString("utf8")),paths,directory);
+        if(manager.lock!==file.path)throw new Error("Prepared lock is not owned by the declared manager.");
+        if(manager.name==="pnpm"&&!/^lockfileVersion:\s*['"]?\d/m.test(file.content)||manager.name==="yarn"&&!/# yarn lockfile v1|^__metadata:/m.test(file.content))throw new Error("Incomplete package-manager lockfile.");
+      }else if(file.path.endsWith("Gemfile.lock")){
+        if(!paths.includes(local("Gemfile"))||!/^GEM\s*$/m.test(file.content)||!/^DEPENDENCIES\s*$/m.test(file.content)||!/^BUNDLED WITH\s*\r?\n\s+\d+\.\d+\.\d+\s*$/m.test(file.content))throw new Error("A complete Bundler lock and matching Gemfile are required.");
+        const original=snapshot.baseline.find(item=>item.path===file.path);
+        if(original&&Buffer.from(original.content,"base64").toString("utf8").match(/^BUNDLED WITH\s*\r?\n\s+(\S+)/m)?.[1]!==file.content.match(/^BUNDLED WITH\s*\r?\n\s+(\S+)/m)?.[1])throw new Error("The baseline exact Bundler version must be preserved.");
+      }else if(file.path.endsWith("Cargo.lock")){
+        if(!paths.includes(local("Cargo.toml"))||!/^version\s*=\s*[34]\s*$/m.test(file.content)||!/\[\[package\]\]/.test(file.content))throw new Error("A complete Cargo lock and matching manifest are required.");
+      }else{
+        const unit=pythonUnits(paths).find(unit=>unit.project===directory);
+        if(unit?.lock!==file.path)throw new Error("Prepared Python lock does not match the original manager.");
+        if(unit.manager==="pipenv"){
+          const lock=JSON.parse(file.content);
+          if(!lock._meta?.hash?.sha256||!lock.default||!lock.develop)throw new Error("Incomplete Pipenv lock.");
+        }else if(unit.manager==="poetry"?!/\[metadata\]/.test(file.content)||!/lock-version\s*=/.test(file.content):!/^version\s*=\s*\d+/m.test(file.content))throw new Error("Incomplete Python lockfile.");
+      }
+      if(snapshot.preparationComplete&&snapshot.candidate.find(candidate=>candidate.path===file.path)?.content!==Buffer.from(file.content).toString("base64"))throw new Error("Artifact preparation already completed for this job.");
+      continue;
+    }
     if(/(^|\/)(go\.sum|go\.mod|composer\.lock)$/.test(file.path)){
       if(file.variant==="baseline")throw new Error("Baseline dependency files cannot be replaced by prepared artifacts.");
       const manifestPath=file.path.replace(/(go\.sum|go\.mod)$/,"go.mod").replace(/composer\.lock$/,"composer.json");
@@ -26,12 +55,13 @@ export function validatePreparedLocks(snapshot:ArtifactSnapshot,files:PreparedFi
       if(snapshot.preparationComplete&&snapshot.candidate.find(candidate=>candidate.path===file.path)?.content!==Buffer.from(file.content).toString("base64"))throw new Error("Artifact preparation already completed for this job.");
       continue;
     }
-    if(!/(^|\/)package-lock\.json$/.test(file.path))throw new Error("Only package-manager-generated package-lock.json, go.mod, go.sum and composer.lock artifacts are permitted.");
+    if(!/(^|\/)package-lock\.json$/.test(file.path))throw new Error("Only qualified package-manager-generated lock/dependency artifacts are permitted.");
     const manifestPath=file.path.replace(/package-lock\.json$/,"package.json");
     if(file.variant==="baseline"&&!snapshot.baselinePreparationPaths?.includes(file.path))throw new Error("Baseline runtime locks cannot be replaced by candidate artifacts.");
     const source=snapshot[file.variant||"candidate"].find(candidate=>candidate.path===manifestPath);
     if(!source)throw new Error(`Prepared lockfile has no candidate manifest: ${file.path}`);
     const manifest=JSON.parse(Buffer.from(source.content,"base64").toString("utf8"));
+    if(nodeManager(manifest,snapshot[file.variant].map(item=>item.path),file.path.includes("/")?file.path.slice(0,file.path.lastIndexOf("/")):".").name!=="npm")throw new Error("npm must not replace another package manager's lock.");
     const lock=JSON.parse(file.content);
     if(![2,3].includes(lock.lockfileVersion)||!lock.packages?.[""])throw new Error("A complete npm v2/v3 lockfile is required.");
     const root=lock.packages[""];
@@ -72,9 +102,9 @@ export async function acceptPreparedLocks(client:Pick<PoolClient,"query">,job:{i
       current.snapshot.baseline=current.snapshot.baseline.filter(source=>source.path!==file.path).concat(snapshotFile);
       continue;
     }
-    const before=current.snapshot.sourceLockfiles.find(source=>source.path===file.path);
+    const before=current.snapshot.sourceLockfiles.find(source=>source.path===file.path)||(!current.snapshot.baselinePreparationPaths?.includes(file.path)?current.snapshot.baseline.find(source=>source.path===file.path):undefined);
     const content=before?Buffer.from(before.content,"base64").toString("utf8"):"";
-    await client.query("INSERT INTO transformation_changes(run_id,path,operation,area,rationale,before_content,after_content,additions,deletions,validation,agent_type,user_modified) VALUES($1,$2,$3,'platform',$4,$5,$6,$7,$8,'[]'::jsonb,'testing',true) ON CONFLICT(run_id,path) DO UPDATE SET operation=EXCLUDED.operation,before_content=EXCLUDED.before_content,after_content=EXCLUDED.after_content,rationale=EXCLUDED.rationale,additions=EXCLUDED.additions,deletions=EXCLUDED.deletions,validation='[]'::jsonb,user_modified=true",[job.run_id,file.path,before?"modified":"added","Generated by the package manager (npm, Go or Composer) in the isolated preparation job. Included in the changeset for human review.",content,file.content,file.content.split("\n").length,content?content.split("\n").length:0]);
+    await client.query("INSERT INTO transformation_changes(run_id,path,operation,area,rationale,before_content,after_content,additions,deletions,validation,agent_type,user_modified) VALUES($1,$2,$3,'platform',$4,$5,$6,$7,$8,'[]'::jsonb,'testing',true) ON CONFLICT(run_id,path) DO UPDATE SET operation=EXCLUDED.operation,before_content=EXCLUDED.before_content,after_content=EXCLUDED.after_content,rationale=EXCLUDED.rationale,additions=EXCLUDED.additions,deletions=EXCLUDED.deletions,validation='[]'::jsonb,user_modified=true",[job.run_id,file.path,before?"modified":"added","Generated by the source-selected package manager in the isolated preparation job. Included in the changeset for human review.",content,file.content,file.content.split("\n").length,content?content.split("\n").length:0]);
     current.snapshot.candidate=current.snapshot.candidate.filter(candidate=>candidate.path!==file.path).concat(snapshotFile);
   }
   current.snapshot.preparationComplete=true;

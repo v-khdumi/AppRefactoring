@@ -1,9 +1,9 @@
 import { ServiceBusClient, type ServiceBusReceivedMessage } from "@azure/service-bus";
 import {randomUUID} from "node:crypto";
-import { ManagedIdentityCredential } from "@azure/identity";
+import {managedIdentityCredential} from "../src/lib/managed-identity";
 import { env, serviceBusNamespace } from "../src/lib/env";
 import { database, transaction } from "../src/lib/db";
-import { readInstalledRepository,readInstalledFile,readVerificationSnapshot } from "../src/lib/github-app";
+import { readSourceRepository,readSourceSnapshot } from "../src/lib/source-provider";
 import { generateTransformationPlan,InvalidGeneratedPlanError } from "../src/lib/transformation-engine";
 import {repositoryEvidence,dependencyLock} from "../src/lib/repository-evidence";
 import type {ModernizationScope} from "../src/types/modernization";
@@ -16,6 +16,8 @@ import {withRunLock,requireActiveRun,RunInterruptedError} from "../src/lib/run-c
 import { processAndSettle } from "../src/lib/message-processing";
 import { validationExecution } from "../src/lib/validation-execution";
 import { prepareVerification, dispatchVerification,recoverVerificationDispatches,cleanupWindowsVerifiers } from "../src/lib/verification-service";
+import {scenarioForOptions,scenarioAcceptance,validateScenarioScope,ScenarioPolicyError} from "../src/lib/modernization-scenarios";
+import {ContentPolicyError} from "../src/lib/content-policy";
 
 type Run={id:string;repository_url:string;source_branch:string;source_commit_sha:string|null;scope:ModernizationScope;options:Record<string,unknown>;status:string};
 type RunIdentity={id:string;tenantId:string;token:string};
@@ -31,7 +33,7 @@ async function processRun(message: ServiceBusReceivedMessage) {
     try{await processLockedRun(body,identity,message);}
     catch(error){
       if(error instanceof RunInterruptedError){logEvent("info","transformation.interrupted",{runId:identity.id});return;}
-      const permanent=error instanceof VerificationReadinessError||error instanceof AgentOwnershipError||error instanceof InvalidGeneratedPlanError||error instanceof RunPreconditionError;
+      const permanent=error instanceof VerificationReadinessError||error instanceof AgentOwnershipError||error instanceof InvalidGeneratedPlanError||error instanceof RunPreconditionError||error instanceof ContentPolicyError||error instanceof ScenarioPolicyError;
       await transaction(async client=>{
         const failed=await client.query("UPDATE modernization_runs SET status=CASE WHEN $4 OR COALESCE((options->>'executionAttempts')::int,0)>=4 THEN 'failed' ELSE 'retrying' END,current_stage='generation-failed',error_code=$5,error_detail=$6,updated_at=now(),version=version+1 WHERE id=$1 AND tenant_id=$2 AND status='running' AND options->>'workerToken'=$3 RETURNING id",[identity.id,identity.tenantId,identity.token,permanent,error instanceof Error?error.name:"GenerationError",error instanceof Error?error.message.slice(0,4000):"Generation failed"]);
         if(failed.rowCount)await client.query("UPDATE agent_tasks SET status='blocked',error=COALESCE(error,$2),completed_at=now() WHERE run_id=$1 AND status IN ('queued','running','retrying')",[identity.id,error instanceof Error?error.message.slice(0,4000):"Generation failed"]);
@@ -50,19 +52,18 @@ async function processLockedRun(body:{agentType?:AgentType;recovery?:boolean},id
   });
   if(!result.rowCount){logEvent("info","transformation.skipped",{runId:identity.id,reason:"already-claimed-or-terminal"});return;}
   const run = result.rows[0];
+  const scenario=scenarioForOptions(run.options);
+  validateScenarioScope(scenario,run.scope);
   logEvent("info","transformation.started",{runId:run.id,tenantId:identity.tenantId,correlationId:message.correlationId||message.messageId});
-  const match = run.repository_url.match(/^https:\/\/github\.com\/([^/]+)\/([^/#]+?)(?:\.git)?\/?$/i);
-  if (!match) throw new RunPreconditionError("Invalid GitHub repository URL.");
-  const [, owner, repo] = match;
-
   await updateRun(identity,10,"repository-inventory");
-  const repository = await readInstalledRepository(owner, repo, run.source_branch);
+  const repository = await readSourceRepository(run.repository_url,run.source_branch);
   const analyzed=run.options.architectureAnalysis as {sourceCommitSha?:string}|undefined;
   const expected=run.source_commit_sha||run.options.sourceCommitSha||analyzed?.sourceCommitSha;
   if(expected&&expected!==repository.sourceSha)throw new RunPreconditionError("Source changed since analysis. A new analysis and review are required before generation.");
-  await readVerificationReadiness(repository.files,path=>readInstalledFile(owner,repo,path,repository.sourceSha,repository.token),{scope:run.scope,backendTarget:typeof run.options.backendTarget==="string"?run.options.backendTarget:undefined});
+  const readinessOptions={scope:run.scope,backendTarget:typeof run.options.backendTarget==="string"?run.options.backendTarget:undefined,scenario};
+  await readVerificationReadiness(repository.files,repository.readFile,readinessOptions);
   await database().query("UPDATE modernization_runs SET source_commit_sha=$1 WHERE id=$2 AND tenant_id=$3 AND status='running' AND options->>'workerToken'=$4",[repository.sourceSha,run.id,identity.tenantId,identity.token]);
-  const snapshot=await readVerificationSnapshot(owner,repo,repository.sourceSha);
+  const snapshot=await readSourceSnapshot(run.repository_url,repository.sourceSha);
   const source=snapshot.filter(file=>!dependencyLock.test(file.path)).flatMap(file=>{
     const content=Buffer.from(file.content,"base64");
     if(content.includes(0))return [];
@@ -91,13 +92,16 @@ async function processLockedRun(body:{agentType?:AgentType;recovery?:boolean},id
     generate:async context=>{
       await updateRun(identity,Math.min(70,30+completed*7),`coordinated-agent-${context.agent}`);
       await startAgentOutput(identity,context.agent,context.files.map(file=>file.path));
-      return generateTransformationPlan({repository:`${owner}/${repo}`,scope:run.scope,files:context.files,options:{...run.options,architectureAnalysis:undefined,workerToken:undefined,pendingRefinement:undefined,agentType:context.agent,agentObjective:objectives[context.agent],instruction:pending?.agentType===context.agent?pending.instruction:undefined,dependencyEvidence,coordinationContract:context.contract,precedingAgents:context.preceding,requireCoordinationContract:context.agent==="architect"}},output=>saveAgentOutput(identity,context.agent,output));
+      return generateTransformationPlan({repository:repository.descriptor.name,scope:run.scope,files:context.files,options:{...run.options,architectureAnalysis:undefined,workerToken:undefined,pendingRefinement:undefined,agentType:context.agent,agentObjective:objectives[context.agent],instruction:pending?.agentType===context.agent?pending.instruction:undefined,dependencyEvidence,coordinationContract:context.contract,precedingAgents:context.preceding,requireCoordinationContract:context.agent==="architect"}},output=>saveAgentOutput(identity,context.agent,output));
     },
     onAccepted:async(agent,plan)=>{
       completed++;
       await database().query("UPDATE agent_tasks SET status='passed',error=NULL,progress=100,summary=$1,files_owned=$2::jsonb,completed_at=now() WHERE run_id=$3 AND agent_type=$4 AND EXISTS(SELECT 1 FROM modernization_runs r WHERE r.id=$3 AND r.tenant_id=$5 AND r.status='running' AND r.options->>'workerToken'=$6)",[plan.summary,JSON.stringify(plan.changes.map(change=>change.path)),run.id,agent,identity.tenantId,identity.token]);
     },
   });
+  const candidateFiles=new Map(source.map(file=>[file.path,file.content]));
+  for(const {change} of generated.changes){if(change.status==="deleted")candidateFiles.delete(change.path);else candidateFiles.set(change.path,change.after);}
+  scenarioAcceptance([...candidateFiles].map(([path,content])=>({path,content})),scenario,false);
   await updateRun(identity,75,"persisting-changes");
 
   await transaction(async (client) => {
@@ -149,7 +153,7 @@ function countAdded(before: string, after: string) {
 
 const namespace=serviceBusNamespace();
 if (!namespace&&!env.AZURE_SERVICE_BUS_CONNECTION_STRING) throw new Error("Azure Service Bus configuration is required.");
-const bus = namespace?new ServiceBusClient(namespace,new ManagedIdentityCredential()):new ServiceBusClient(env.AZURE_SERVICE_BUS_CONNECTION_STRING!);
+const bus = namespace?new ServiceBusClient(namespace,managedIdentityCredential()):new ServiceBusClient(env.AZURE_SERVICE_BUS_CONNECTION_STRING!);
 const receiver = bus.createReceiver(env.AZURE_SERVICE_BUS_QUEUE, { receiveMode: "peekLock", maxAutoLockRenewalDurationInMs: 60 * 60 * 1000 });
 const instanceId=process.env.HOSTNAME||`worker-${process.pid}`;
 let stopping=false;

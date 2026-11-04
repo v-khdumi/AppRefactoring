@@ -1,11 +1,12 @@
 # ModernizeAI
 
-ModernizeAI is an engineering control center for analyzing and incrementally modernizing legacy applications. It connects to GitHub, maps the current architecture with a Microsoft Foundry model, proposes a target architecture, and runs a controlled transformation workflow that protects existing behavior.
+ModernizeAI is an engineering control center for analyzing and incrementally modernizing legacy applications. It reads a pinned source snapshot, proposes architecture with a Microsoft Foundry model, and generates a reviewable transformation. Passing checks establish only the behavior actually exercised, not universal compatibility or production certification.
 
 ## Product capabilities
 
-- Public and private GitHub repositories with server-side, non-persisted credentials.
+- GitHub App access and server-managed GitHub Enterprise, GitLab, Azure Repos and Bitbucket Cloud adapters. See [source connections and qualification](docs/source-providers.md).
 - Frontend, backend, or full-stack modernization scope.
+- Explicit upgrade, refactor, replatform, service extraction, cross-runtime rewrite, database migration and AI strategies with scenario-specific acceptance prerequisites.
 - Target language and framework selection.
 - Azure cloud-readiness and optional AI capabilities.
 - Current-versus-target architecture visualization.
@@ -13,26 +14,57 @@ ModernizeAI is an engineering control center for analyzing and incrementally mod
 - Observable execution pipeline with live stage progress.
 - Exact file-level change manifest and side-by-side before/after diffs.
 - Rationale and validation evidence for every proposed file change.
-- Compilation, security, contract, regression, and behavior-parity gates.
-- Human approval before pull-request creation.
+- Executed baseline/candidate build and test evidence, dependency audits, and configured strategy acceptance checks.
+- Independent human approval before pull-request creation; initiators and contributors cannot approve their own work.
 - Immutable activity-log experience.
-- Parallel specialist agents for architecture, frontend, backend, cloud, testing, and security.
+- Coordinated sequential specialists for architecture, frontend, backend, cloud, testing, and security.
 - Per-agent ownership, status, progress, and conversational refinement.
 - User-editable generated files with automatic Testing Agent revalidation.
 - User-editable and versioned target architecture diagrams.
 - AI-adjusted delivery estimates separating generation time from validation and human review.
 - Explicit demo mode that never claims to have modified a real repository.
 
+### Support and qualification
+
+The supported adapters are not a promise that every application passes.
+Execution preserves the source's manager/version and rejects missing,
+unexecuted, skipped or unverifiable checks.
+
+| Surface | Current evidence and limitations |
+| --- | --- |
+| npm, pnpm, Yarn Classic/Berry | Implemented; real Linux pass/fail/empty/skipped/audit canaries |
+| Python requirements, Poetry, uv, Pipenv | Implemented; real Linux manager-preservation and verification canaries; Python 3.11 compatibility required |
+| .NET, Maven/Gradle, Go, Composer | Existing isolated profiles; project-specific compatibility and tests remain required |
+| Rust | Implemented; locked Cargo and live dependency-audit canaries |
+| Ruby | Implemented; qualified Ruby 3.1.2 with exact locked Bundler, RSpec/Minitest and live audits |
+| C/C++ | CMake/system-dependency profile implemented; real compilation/CTest ran, but native audit findings block current qualification; Conan/vcpkg/Meson/MSVC are not silently accepted |
+| COBOL | GnuCOBOL executable-contract profile implemented; real compilation/tests ran, but current native audit evidence blocks qualification |
+| Mixed .NET Framework + frontend | Executor implemented for npm; live Azure infrastructure prevented qualification, so admission remains blocked |
+| GitHub Enterprise/GitLab/Azure Repos/Bitbucket | Adapters and HTTP contract tests implemented; authenticated canaries explicitly pending operator-configured service access |
+| Specialized strategies | Require real, source/digest-bound acceptance harnesses; Windows strategy execution is not qualified |
+
+Review [the verifier matrix](docs/verification-runner.md), [strategy acceptance](docs/modernization-scenarios.md)
+and [release gates](docs/enterprise-runbook.md) before onboarding a repository.
+Production egress/adversarial, load/soak, restore/DR and organizational approval
+remain separate requirements; a successful platform build is not their evidence.
+
+The capability designer preserves clarification answers in the reviewed design,
+labels rules-based/demo drafts explicitly and lists requested Azure services as
+structured data. Editing requirements invalidates the previous draft. Local
+high-confidence credential checks reject suspected keys before model requests,
+manual-edit persistence and generated-change acceptance; these checks are not a
+replacement for a complete secret scanner or SAST.
+
 ## Run locally
 
-Requirements: Node.js 20 or newer and npm 10 or newer.
+Requirements: Node.js 22 or 24, and npm 10 or newer.
 
 1. Copy `.env.example` to `.env.local`.
 2. Run `npm install`.
 3. Run `npm run dev`.
 4. Open `http://127.0.0.1:3000`.
 
-Demo behavior is opt-in. Set `DEMO_MODE=true` only in an isolated demonstration environment; missing production integrations fail closed.
+Demo behavior is opt-in. Set `DEMO_MODE=true` only in an isolated demonstration environment; this local demo does not need fabricated Entra identifiers. Live workspaces require real Entra configuration. Blank optional example settings are treated as absent; invalid nonempty settings fail validation. Never configure a local demo with production credentials.
 
 ## Microsoft Foundry
 
@@ -41,7 +73,7 @@ Configure these server-only environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `AZURE_AI_FOUNDRY_ENDPOINT` | Foundry model inference endpoint |
-| `AZURE_AI_FOUNDRY_API_KEY` | Access key; use Key Vault or managed identity in production |
+| `AZURE_AI_FOUNDRY_API_KEY` | Server-side inference access key, injected through Key Vault in production |
 | `AZURE_AI_FOUNDRY_MODEL` | Model or deployment name |
 | `AZURE_AI_FOUNDRY_API_VERSION` | Model inference API version |
 | `DEMO_MODE` | Set to `false` to require live integrations |
@@ -49,6 +81,11 @@ Configure these server-only environment variables:
 The endpoint must support Azure AI Model Inference `chat/completions`. The API key has no `NEXT_PUBLIC_` prefix and is never included in the client bundle.
 
 ## Safe production workflow
+
+These are qualification requirements, not a claim that the platform automatically
+executes every application-specific check. Source sampling is not an SBOM or a
+complete dependency graph. Candidate dependency audits and AI review do not
+replace SAST, secret scanning, real integration tests or shadow traffic.
 
 1. **Discover** — read-only inventory, languages, dependencies, SBOM, and integration map.
 2. **Baseline** — characterization tests and external behavior contracts.
@@ -61,15 +98,15 @@ The endpoint must support Azure AI Model Inference `chat/completions`. The API k
 
 ## Multi-agent execution model
 
-The orchestrator dispatches architecture, frontend, backend, cloud, testing, and security specialists concurrently. Each agent owns an isolated set of paths. Outputs are merged only when identical paths do not conflict; conflicting output blocks the run. Users can send focused instructions to any agent, and every refinement is persisted in the conversation and audit trail.
+Architecture establishes the shared contract first. Backend, frontend and optional cloud work then execute sequentially against accepted candidate files, followed by security review and testing. Ownership checks prevent unapproved path conflicts. Users can send focused instructions to an agent, and refinements are persisted in the conversation and audit trail.
 
 The Testing Agent is independent from implementation agents and is restricted to test artifacts. Manual code edits clear prior validation evidence and automatically queue the Testing Agent. Approval remains blocked until the Testing Agent passes and every file has current evidence.
 
 ## Estimation model
 
-Delivery estimates are adjusted for AI parallelism but do not treat generation speed as total delivery time. The displayed range accounts for repository size, modernization scope, technical findings, cloud/AI additions, parallel agent count, behavior-parity validation, and human approval. The UI separately displays estimated agent-generation hours and verification days, together with confidence and assumptions.
+Delivery estimates are low-confidence planning heuristics, not measured commitments. They account for repository size, scope, findings, cloud/AI additions, sequential generation, verification and human review. They do not assume parallel specialist speed-up.
 
-Real repository writes use the GitHub App, short-lived installation tokens, commit-bound approval, an isolated branch, and a draft pull request. Direct writes to the source branch are prohibited.
+Real repository writes require source/digest-bound independent approval, a separate branch and a confirmed draft pull/merge request. GitHub uses short-lived App tokens; other providers use administrator-managed service connections. Direct writes to the source branch are prohibited. See [strategy acceptance](docs/modernization-scenarios.md).
 
 ## API routes
 

@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env, demoEnabled } from "@/lib/env";
+import {hasRequiredRole} from "./authorization-policy";
 
 export interface UserContext {
   id: string;
@@ -26,9 +27,11 @@ export async function requireUser(request: Request, requiredRoles: string[] = []
       throw new AuthError("The access token was not issued for this ModernizeAI environment.", 401);
     }
     const roles = Array.isArray(payload.roles) ? payload.roles.filter((role): role is string => typeof role === "string") : [];
-    if (requiredRoles.length && !requiredRoles.some((role) => roles.includes(role))) throw new AuthError("The requested operation is not permitted.", 403);
+    if (!hasRequiredRole(roles,requiredRoles)) throw new AuthError("The requested operation is not permitted.", 403);
+    const userId=payload.oid||payload.sub;
+    if(typeof userId!=="string"||!userId||payload.tid!==env.AZURE_TENANT_ID)throw new AuthError("The access token is missing a valid user or tenant identity.",401);
     return {
-      id: String(payload.oid || payload.sub),
+      id: userId,
       name: String(payload.name || "Authenticated user"),
       email: typeof payload.preferred_username === "string" ? payload.preferred_username : undefined,
       roles,

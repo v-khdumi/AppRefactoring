@@ -1,4 +1,14 @@
 export type ModernizationScope = "frontend" | "backend" | "fullstack";
+export const modernizationScenarios=[
+  {id:"upgrade",label:"Upgrade versions and dependencies",requiresBackend:false},
+  {id:"refactor",label:"Refactor within the existing runtime",requiresBackend:false},
+  {id:"replatform",label:"Replatform and containerize",requiresBackend:false},
+  {id:"extract-services",label:"Extract services incrementally",requiresBackend:true},
+  {id:"rewrite",label:"Rewrite across runtimes",requiresBackend:true},
+  {id:"database-migration",label:"Migrate database and data access",requiresBackend:true},
+  {id:"ai-capability",label:"Add AI capabilities",requiresBackend:false},
+] as const;
+export type ModernizationScenario=typeof modernizationScenarios[number]["id"];
 export type FindingSeverity = "critical" | "high" | "medium" | "low";
 
 export interface RepositoryInput {
@@ -8,6 +18,7 @@ export interface RepositoryInput {
 }
 
 export interface ModernizationOptions {
+  scenario?:ModernizationScenario;
   scope: ModernizationScope;
   frontendTarget?: string;
   backendTarget?: string;
@@ -37,13 +48,14 @@ export interface Finding {
 }
 
 export interface AnalysisResult {
+  scenario?:ModernizationScenario;
   sourceCommitSha?:string;
   scope?:ModernizationScope;
   evidence?:import("../lib/repository-evidence").RepositoryEvidence;
   mode: "demo" | "live";
   summary: string;
   confidence: number;
-  repository: { name: string; branch: string; files: number; languages: Record<string, number> };
+  repository: { name: string; url?:string;branch: string; files: number; languages: Record<string, number> };
   currentArchitecture: ArchitectureNode[];
   targetArchitecture: ArchitectureNode[];
   findings: Finding[];
@@ -112,8 +124,10 @@ export interface ModernizationAgent {
 export interface AgentMessage { id: string; agentType: AgentType; role: "user"|"agent"|"system"; content: string; createdAt: string }
 
 export interface TransformationRun {
+  permissions?:{edit:boolean;manage:boolean};
+  approvalAccess?:{canApprove:boolean;reason:string};
   publication?: {attempts:number;lastError?:string;nextAttemptAt?:string};
-  validationExecution?: {id?:string;changesetDigest?:string;status:string;reason:string;updatedAt?:string;steps:Array<{variant:"baseline"|"candidate";project:string;command:string;exitCode:number|null;timedOut:boolean;log:string;durationMs:number}>};
+  validationExecution?: {id?:string;changesetDigest?:string;status:string;reason:string;updatedAt?:string;steps:Array<{variant:"baseline"|"candidate";project:string;command:string;exitCode:number|null;timedOut:boolean;log:string;durationMs:number;tests?:{tests:number;failed:number;skipped:number}}>};
   id: string;
   name: string;
   repository: string;

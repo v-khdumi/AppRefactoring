@@ -23,6 +23,9 @@ param githubAppPrivateKey string
 @secure()
 param githubWebhookSecret string
 @secure()
+@description('JSON source service connections, resolved only on the server. Store credentials in Key Vault.')
+param sourceConnections string = '[]'
+@secure()
 param healthCheckToken string
 @description('Operations mailbox that receives production alerts.')
 param operationsEmail string
@@ -218,6 +221,12 @@ resource githubPrivateKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' =
   }
 }
 
+resource sourceConnectionsSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: vault
+  name: 'source-connections'
+  properties: { value: sourceConnections }
+}
+
 resource githubWebhookSecretResource 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: vault
   name: 'github-webhook-secret'
@@ -403,6 +412,32 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
+resource verificationEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${prefix}-verification-cae'
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logs.properties.customerId
+        sharedKey: logs.listKeys().primarySharedKey
+      }
+    }
+  }
+}
+
+module verification 'verification.bicep' = {
+  name: '${prefix}-verification'
+  params: {
+    location: location
+    jobName: '${prefix}-verify'
+    environmentId: verificationEnvironment.id
+    starterPrincipalIds: [identity.properties.principalId]
+  }
+}
+
+var verificationOrigin = 'https://${prefix}-web.${environment.properties.defaultDomain}'
+
 var registryConfiguration = [
   {
     server: registry.properties.loginServer
@@ -417,6 +452,11 @@ var databaseSecretReference = {
 var githubSecretReference = {
   name: 'github-key'
   keyVaultUrl: githubPrivateKeySecret.properties.secretUriWithVersion
+  identity: identity.id
+}
+var sourceConnectionsSecretReference = {
+  name: 'source-connections'
+  keyVaultUrl: sourceConnectionsSecret.properties.secretUriWithVersion
   identity: identity.id
 }
 
@@ -494,6 +534,7 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
           identity: identity.id
         }
         githubSecretReference
+        sourceConnectionsSecretReference
         {
           name: 'github-webhook'
           keyVaultUrl: githubWebhookSecretResource.properties.secretUriWithVersion
@@ -531,8 +572,12 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'NEXT_PUBLIC_AZURE_CLIENT_ID', value: entraClientId }
             { name: 'GITHUB_APP_ID', value: githubAppId }
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
+            { name: 'SOURCE_CONNECTIONS', secretRef: 'source-connections' }
+            { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook' }
             { name: 'HEALTH_CHECK_TOKEN', secretRef: 'health-token' }
+            { name: 'VERIFICATION_JOB_RESOURCE_ID', value: verification.outputs.jobResourceId }
+            { name: 'VERIFICATION_PUBLIC_ORIGIN', value: verificationOrigin }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
             { name: 'KEY_VAULT_URL', value: vault.properties.vaultUri }
           ]
@@ -579,6 +624,7 @@ resource transformationWorker 'Microsoft.App/containerApps@2025-02-02-preview' =
           identity: identity.id
         }
         githubSecretReference
+        sourceConnectionsSecretReference
       ]
     }
     template: {
@@ -602,6 +648,10 @@ resource transformationWorker 'Microsoft.App/containerApps@2025-02-02-preview' =
             { name: 'AZURE_AI_FOUNDRY_MODEL', value: foundryModel }
             { name: 'GITHUB_APP_ID', value: githubAppId }
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
+            { name: 'SOURCE_CONNECTIONS', secretRef: 'source-connections' }
+            { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
+            { name: 'VERIFICATION_JOB_RESOURCE_ID', value: verification.outputs.jobResourceId }
+            { name: 'VERIFICATION_PUBLIC_ORIGIN', value: verificationOrigin }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
           ]
         }
@@ -650,6 +700,7 @@ resource outboxWorker 'Microsoft.App/containerApps@2025-02-02-preview' = {
       secrets: [
         databaseSecretReference
         githubSecretReference
+        sourceConnectionsSecretReference
       ]
     }
     template: {
@@ -668,6 +719,8 @@ resource outboxWorker 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'GITHUB_APP_ID', value: githubAppId }
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
+            { name: 'SOURCE_CONNECTIONS', secretRef: 'source-connections' }
+            { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
           ]
         }

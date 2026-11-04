@@ -47,6 +47,8 @@ test("Windows .NET Framework verification is routed explicitly and cross-runtime
   assert.equal(legacy.supported,true);assert.ok(legacy.warnings.some(item=>item.code==="WindowsVerifier"));
   const mixed=verificationReadiness([{path:"Web/Web.csproj",content:legacyProject},{path:"ui/package.json",content:'{"scripts":{"build":"vite build","test":"vitest"}}'},{path:"ui/package-lock.json"}],{scope:"fullstack",backendTarget:".NET 10 + ASP.NET Core"});
   assert.equal(mixed.supported,false);assert.ok(mixed.blockers.some(item=>item.code==="WindowsVerifierDotnetOnly"));
+  const mixedPython=verificationReadiness([{path:"Web/Web.csproj",content:legacyProject},{path:"requirements.txt",content:""}],{scope:"fullstack",backendTarget:".NET 10 + ASP.NET Core"});
+  assert.equal(mixedPython.supported,false);assert.ok(mixedPython.blockers.some(item=>item.code==="WindowsVerifierDotnetOnly"));
   assert.equal(requiresWindowsVerifier([file("Web/Web.csproj",legacyProject)]),true);
   assert.equal(requiresWindowsVerifier([file("App.csproj",'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>net48;net8.0</TargetFrameworks></PropertyGroup></Project>')]),true);
   assert.equal(requiresWindowsVerifier([file("src/Api/Api.csproj",webProject)]),false);

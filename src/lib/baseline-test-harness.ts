@@ -1,5 +1,5 @@
 import { safeSnapshotPath } from "./verification-evidence";
-import { ecosystemUnits, isDotnetTestProject, dotnetProject, dotnetFrameworkMoniker } from "./verification-ecosystems";
+import { ecosystemUnits, isDotnetTestProject, dotnetProject, dotnetFrameworkMoniker, nodeManager } from "./verification-ecosystems";
 
 type SnapshotFile={path:string;content:string;executable:boolean};
 const directoryOf=(path:string)=>path.includes("/")?path.slice(0,path.lastIndexOf("/")):".";
@@ -33,6 +33,9 @@ function additiveEcosystemTests(files:Map<string,SnapshotFile>,baseline:Snapshot
     const scoped=additions.filter(file=>withinUnit(unit.project,file.path));
     if(unit.runtime==="maven"||unit.runtime==="gradle")scoped.filter(file=>/(^|\/)src\/test\//.test(file.path)&&characterization(file.path)).forEach(add);
     if(unit.runtime==="go")scoped.filter(file=>file.path.endsWith("_test.go")&&characterization(file.path)&&originalDirectories.has(directoryOf(file.path))).forEach(add);
+    if(unit.runtime==="rust")scoped.filter(file=>/(^|\/)tests\/[^/]+\.rs$/.test(file.path)&&characterization(file.path)).forEach(add);
+    if(unit.runtime==="ruby")scoped.filter(file=>/(^|\/)(test|spec)\//.test(file.path)&&characterization(file.path)&&file.path.endsWith(".rb")).forEach(add);
+    if(unit.runtime==="cobol")scoped.filter(file=>file.path==="tests/cobol-contracts.json").forEach(add);
     if(unit.runtime==="php"){
       let composer:{"require-dev"?:Record<string,string>}={};
       try{composer=JSON.parse(Buffer.from(baseline.find(file=>file.path===(unit.project==="."?"composer.json":`${unit.project}/composer.json`))?.content||"","base64").toString("utf8"));}catch{}
@@ -58,14 +61,14 @@ function automaticHarness(baseline:SnapshotFile[],candidate:SnapshotFile[]){
       files.set(file.path,file);
     }
   };
-  for(const project of baseline.filter(file=>/(^|\/)requirements\.txt$/.test(file.path))){
-    const prefix=project.path.slice(0,-"requirements.txt".length);
+  for(const project of baseline.filter(file=>/(^|\/)(requirements\.txt|pyproject\.toml|Pipfile)$/.test(file.path))){
+    const prefix=project.path.replace(/[^/]+$/,"");
     for(const file of candidate.filter(file=>file.path.startsWith(`${prefix}tests/`)&&file.path.endsWith(".py"))){
       if(!safeSnapshotPath(file.path))throw new Error("Unsafe baseline Python test path.");
       if(files.has(file.path)&&files.get(file.path)!.content!==file.content)throw new Error(`Baseline harness cannot overwrite existing test: ${file.path}`);
       files.set(file.path,file);
     }
-    const development=candidate.find(file=>file.path===`${prefix}requirements-dev.txt`);
+    const development=project.path.endsWith("requirements.txt")?candidate.find(file=>file.path===`${prefix}requirements-dev.txt`):undefined;
     if(development&&!files.has(development.path)){
       const requirements=Buffer.from(development.content,"base64").toString("utf8").split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!line.startsWith('#'));
       if(requirements.some(line=>!/^(httpx|pytest|hypothesis|coverage|pytest-cov)==[0-9][a-zA-Z0-9.!+_-]*$/.test(line)))throw new Error("Baseline test dependencies must be pinned, allowlisted test tools.");
@@ -74,6 +77,10 @@ function automaticHarness(baseline:SnapshotFile[],candidate:SnapshotFile[]){
   }
   for(const original of baseline.filter(file=>/(^|\/)package\.json$/.test(file.path))){
     const source=JSON.parse(Buffer.from(original.content,"base64").toString("utf8"));
+    if(nodeManager(source,baseline.map(file=>file.path),directoryOf(original.path)).name!=="npm"){
+      copyTests(original.path.slice(0,-"package.json".length));
+      continue;
+    }
     if(typeof source.scripts?.test==="string"&&source.scripts.test.trim())continue;
     const proposal=candidate.find(file=>file.path===original.path);
     if(!proposal)continue;

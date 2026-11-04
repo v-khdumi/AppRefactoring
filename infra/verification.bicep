@@ -41,4 +41,18 @@ resource assignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for
   scope: job
   properties: { roleDefinitionId: starterRole.id, principalId: principalId, principalType: 'ServicePrincipal' }
 }]
+resource windowsRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, jobName, 'windows-verification')
+  properties: {
+    roleName: '${jobName} Windows container operator'
+    description: 'Manage ephemeral Windows verification container groups, without permissions on application resources.'
+    type: 'CustomRole'
+    permissions: [{ actions: ['Microsoft.ContainerInstance/containerGroups/read', 'Microsoft.ContainerInstance/containerGroups/write', 'Microsoft.ContainerInstance/containerGroups/delete'], notActions: [] }]
+    assignableScopes: [resourceGroup().id]
+  }
+}
+resource windowsAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for principalId in starterPrincipalIds: {
+  name: guid(resourceGroup().id, principalId, windowsRole.id)
+  properties: { roleDefinitionId: windowsRole.id, principalId: principalId, principalType: 'ServicePrincipal' }
+}]
 output jobResourceId string = job.id

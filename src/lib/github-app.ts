@@ -111,9 +111,12 @@ export async function publishChanges(input: {
   const source = await github<{ object: { sha: string } }>(`/repos/${input.owner}/${input.repo}/git/ref/heads/${encodeURIComponent(input.sourceBranch)}`, {}, token);
   if (source.object.sha !== input.expectedCommitSha) throw new Error("The source branch changed after approval; a new review is required.");
   const baseCommit = await github<{ tree: { sha: string } }>(`/repos/${input.owner}/${input.repo}/git/commits/${source.object.sha}`, {}, token);
+  const baseline=await github<{truncated?:boolean;tree:Array<{path:string;mode:string}>}>(`/repos/${input.owner}/${input.repo}/git/trees/${baseCommit.tree.sha}?recursive=1`,{},token);
+  if(baseline.truncated)throw new Error("The publication source tree is truncated; file modes cannot be preserved safely.");
+  const modes=new Map(baseline.tree.map(file=>[file.path,file.mode]));
   const tree = await github<{ sha: string }>(`/repos/${input.owner}/${input.repo}/git/trees`, {
     method: "POST",
-    body: JSON.stringify({ base_tree: baseCommit.tree.sha, tree: input.changes.map((change) => change.content === null ? { path: change.path, mode: "100644", type: "blob", sha: null } : { path: change.path, mode: "100644", type: "blob", content: change.content }) }),
+    body: JSON.stringify({ base_tree: baseCommit.tree.sha, tree: input.changes.map((change) => change.content === null ? { path: change.path, mode: modes.get(change.path)||"100644", type: "blob", sha: null } : { path: change.path, mode: modes.get(change.path)||"100644", type: "blob", content: change.content }) }),
   }, token);
   try {
     const reference=await github<{object:{sha:string}}>(`/repos/${input.owner}/${input.repo}/git/ref/heads/${encodeURIComponent(input.targetBranch)}`,{},token);

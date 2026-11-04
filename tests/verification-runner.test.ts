@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+const executedTests={tests:3,failed:0,skipped:0};
+
 test("runner requires real build/test scripts and lock files; failure never becomes success",async()=>{
   // @ts-expect-error standalone runner executes in the isolated Linux job
   const {projectsFor,verifySnapshot}=await import("../scripts/verification-runner.mjs");
@@ -8,7 +10,7 @@ test("runner requires real build/test scripts and lock files; failure never beco
   assert.deepEqual(projectsFor(files),["."]);
   assert.throws(()=>projectsFor(files.slice(0,1)),/Missing package-lock/);
   const noTests=[{path:"package.json",content:Buffer.from(JSON.stringify({scripts:{build:"tsc -b --noCheck && vite build"},workspaces:{packages:["packages/*"]}})).toString("base64")},files[1]];
-  const unsupported=await verifySnapshot({baseline:noTests,candidate:files},async()=>{},async(args:string[])=>({command:`npm ${args.join(" ")}`,exitCode:0,timedOut:false,log:"Executed available check",durationMs:1}));
+  const unsupported=await verifySnapshot({baseline:noTests,candidate:files},async()=>{},async(args:string[])=>({command:`npm ${args.join(" ")}`,exitCode:0,timedOut:false,log:"Executed available check",durationMs:1,tests:executedTests}));
   assert.equal(unsupported.status,"unsupported");
   assert.match(unsupported.reason,/baseline package.json: missing scripts.test/);
   assert.equal(unsupported.steps.length,7);
@@ -23,7 +25,7 @@ test("runner requires real build/test scripts and lock files; failure never beco
   const execute=async(args:string[])=>{calls++;return {command:`npm ${args.join(" ")}`,exitCode:calls===3?1:0,timedOut:false,log:"actual process output",durationMs:1};};
   const failed=await verifySnapshot({baseline:files,candidate:files},async()=>{},execute);
   assert.equal(failed.status,"failed");assert.equal(calls,3);
-  const passed=await verifySnapshot({baseline:files,candidate:files},async()=>{},async(args:string[])=>({command:`npm ${args.join(" ")}`,exitCode:0,timedOut:false,log:"",durationMs:1}));
+  const passed=await verifySnapshot({baseline:files,candidate:files},async()=>{},async(args:string[])=>({command:`npm ${args.join(" ")}`,exitCode:0,timedOut:false,log:"",durationMs:1,tests:executedTests}));
   assert.equal(passed.status,"passed");assert.equal(passed.steps.length,8);
 });
 
@@ -33,7 +35,7 @@ test("baseline audit findings do not prevent measuring candidate checks or becom
   const manifest=(testScript:boolean)=>({path:"package.json",content:Buffer.from(JSON.stringify({scripts:{build:"tsc",...(testScript?{test:"vitest"}:{})}})).toString("base64")});
   const lock={path:"package-lock.json",content:Buffer.from("{}").toString("base64")};
   for(const candidateFails of [false,true]){
-    const result=await verifySnapshot({baseline:[manifest(false),lock],candidate:[manifest(true),lock]},async()=>{},async(args:string[],cwd:string)=>({command:`npm ${args.join(" ")}`,exitCode:args[0]==="audit"&&(cwd.includes("baseline")||candidateFails)?1:0,timedOut:false,log:"# npm audit report\nSeverity: high",durationMs:10}));
+    const result=await verifySnapshot({baseline:[manifest(false),lock],candidate:[manifest(true),lock]},async()=>{},async(args:string[],cwd:string)=>({command:`npm ${args.join(" ")}`,exitCode:args[0]==="audit"&&(cwd.includes("baseline")||candidateFails)?1:0,timedOut:false,log:"# npm audit report\nSeverity: high",durationMs:10,tests:executedTests}));
     assert.equal(result.status,candidateFails?"failed":"unsupported");
     assert.equal(result.steps.length,7);
     assert.match(result.reason,/baseline/i);
@@ -48,7 +50,7 @@ test("a clean tested candidate can pass with recorded baseline vulnerabilities o
   const {verifySnapshot}=await import("../scripts/verification-runner.mjs");
   const files=[{path:"package.json",content:Buffer.from(JSON.stringify({scripts:{build:"tsc",test:"vitest"}})).toString("base64")},{path:"package-lock.json",content:Buffer.from("{}").toString("base64")}];
   for(const auditError of [false,true]){
-    const result=await verifySnapshot({baseline:files,candidate:files},async()=>{},async(args:string[],cwd:string)=>({command:`npm ${args.join(" ")}`,exitCode:args[0]==="audit"&&cwd.includes("baseline")?1:0,timedOut:false,log:auditError?"npm error ECONNRESET":"# npm audit report\nSeverity: high",durationMs:1}));
+    const result=await verifySnapshot({baseline:files,candidate:files},async()=>{},async(args:string[],cwd:string)=>({command:`npm ${args.join(" ")}`,exitCode:args[0]==="audit"&&cwd.includes("baseline")?1:0,timedOut:false,log:auditError?"npm error ECONNRESET":"# npm audit report\nSeverity: high",durationMs:1,tests:executedTests}));
     assert.equal(result.status,auditError?"failed":"passed");
     if(!auditError){
       assert.equal(result.steps.length,8);
@@ -57,4 +59,18 @@ test("a clean tested candidate can pass with recorded baseline vulnerabilities o
       assert.equal(reportPassed(result),true);
     }
   }
+});
+
+test("npm verification rejects successful scripts with empty, missing or skipped test evidence",async()=>{
+  // @ts-expect-error standalone runner executes in the isolated Linux job
+  const {verifySnapshot,npmTestCounts}=await import("../scripts/verification-runner.mjs");
+  const files=[{path:"package.json",content:Buffer.from(JSON.stringify({scripts:{build:"tsc",test:"vitest"}})).toString("base64")},{path:"package-lock.json",content:Buffer.from("{}").toString("base64")}];
+  for(const tests of [undefined,{tests:0,failed:0,skipped:0},{tests:3,failed:0,skipped:1}]){
+    const report=await verifySnapshot({baseline:files,candidate:files},async()=>{},async(args:string[])=>({command:`npm ${args.join(" ")}`,exitCode:0,timedOut:false,log:"",durationMs:1,tests}));
+    assert.equal(report.status,"failed");
+  }
+  assert.deepEqual(npmTestCounts(JSON.stringify({numTotalTests:3,numFailedTests:0,numPendingTests:0,numPassedTests:3}),"json"),executedTests);
+  assert.deepEqual(npmTestCounts("# tests 3\n# pass 3\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n"),executedTests);
+  assert.throws(()=>npmTestCounts("All tests passed"),/counter/);
+  assert.throws(()=>npmTestCounts('{"numTotalTests":3,"numPassedTests":0,"numFailedTests":0,"numPendingTests":0}',"json"),/inconsistent/);
 });

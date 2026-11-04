@@ -25,6 +25,9 @@ export async function GET(request:Request,context:{params:Promise<{id:string}>})
   if(!job)return NextResponse.json({error:"Not found."},{status:404});
   const scriptKind=new URL(request.url).searchParams.get("script");
   if(scriptKind==="1")return new Response(await readFile("scripts/verification-runner.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
+  if(scriptKind==="scenario")return new Response(await readFile("scripts/scenario-verification.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
+  if(scriptKind==="windows-node")return new Response(await readFile("scripts/windows-node-verification.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
+  if(scriptKind==="security")return new Response(await readFile("scripts/candidate-security.mjs","utf8"),{headers:{"Content-Type":"text/javascript","Cache-Control":"no-store"}});
   if(scriptKind==="windows")return new Response(await readFile("scripts/windows-verification-runner.ps1","utf8"),{headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"}});
   if(!job.snapshot)return NextResponse.json({error:"Snapshot not ready."},{status:409});
   return NextResponse.json(job.snapshot,{headers:{"Cache-Control":"no-store"}});

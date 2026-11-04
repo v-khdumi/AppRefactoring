@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { parseGitHubUrl } from "@/lib/github";
-import { readInstalledRepository } from "@/lib/github-app";
+import {readSourceRepository} from "@/lib/source-provider";
 import { AuthError, requireUser } from "@/lib/auth";
 
 const schema = z.object({
-  url: z.string().url().refine((url) => url.toLowerCase().startsWith("https://github.com/"), "Only GitHub repositories are supported."),
+  url: z.string().url(),
   branch: z.string().max(200).optional(),
 });
 
@@ -13,12 +12,13 @@ export async function POST(request: Request) {
   try {
     await requireUser(request, ["Modernization.Reader", "Modernization.Admin"]);
     const input = schema.parse(await request.json());
-    const parsed=parseGitHubUrl(input.url);const branch=input.branch||"main";const repository=await readInstalledRepository(parsed.owner,parsed.repo,branch);
+    const branch=input.branch||"main";const repository=await readSourceRepository(input.url,branch);
     return NextResponse.json({
-      name: `${parsed.owner}/${parsed.repo}`,
+      name: repository.descriptor.name,
+      provider:repository.descriptor.provider,
       branch,
       private: true,
-      description: "Authorized through the installed GitHub App",
+      description: "Read from the pinned commit using the configured source connection",
       fileCount: repository.files.length,
       languages: {},
     });

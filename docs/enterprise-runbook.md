@@ -102,6 +102,51 @@ adversarial testing, backup/DR exercises, load/soak testing, independent approva
 and the dedicated canary repository from this pilot. They remain open for any
 external-tenant or certified production release.
 
+## Implementation verification, 2026-11-04
+
+An identity-free ephemeral job, `modernize-canary-40f315b8-214s4xj`, executed the
+current npm verification runner in the existing pilot on 2026-11-04. Actual Node
+TAP tests passed on baseline and candidate. Failed tests, zero-test scripts and
+skipped tests were rejected. Separate UID, sanitized environment and timeout
+assertions passed. Only the dedicated canary job was created and deleted; the
+existing application revisions and verifier definition were not changed.
+
+The dedicated PostgreSQL canary execution
+`modernize-approval-40f315b8-8mcaahd` applied all seven migrations to an ephemeral
+PostgreSQL 15.19 instance, with no connection to the pilot database. It verified
+self/contributor approval rejection, tenant isolation, stale digest and zero-test
+evidence rejection, append-only auditing, and concurrent independent approvals
+producing exactly one approval and one outbox event. Its verifier reports were
+synthetic fixtures for SQL transaction tests; this is not application behavior
+verification or an Entra sign-in canary. The owned job and its database were
+deleted after acceptance.
+
+This is targeted verifier evidence, not an authenticated source-provider
+publication canary, a Windows/new-ecosystem qualification, a container scan or
+production certification. Newly added provider connections and specialized
+strategy harnesses require their own live acceptance.
+
+The candidate Semgrep canary `modernize-security-40f315b8-nace6t7` passed clean
+source and rejected actual dynamic-evaluation, credential and ignore-file
+bypass fixtures using the pinned local scanner. Runtime canaries separately
+qualified pnpm, both Yarn generations, Poetry, uv, Pipenv, Rust and Ruby;
+the exact fixtures and negative cases are recorded in the verification runner
+documentation.
+
+Mixed Windows qualification did **not** pass. Dedicated ACI group
+`modernize-win-canary-40f315b8` pulled the pinned Windows image, but Azure
+containerd failed before supervisor startup with a closed bridge/network
+connection. The owned group was deleted. An alternative West Europe group was
+rejected by Azure `RequestDisallowedByAzure` / `locationineligible`. No runtime
+or audit gate was waived. Mixed Windows readiness remains blocked; its
+implemented helper has local regression coverage only.
+
+Authenticated source-provider canaries are explicitly deferred by the operator
+until dedicated repositories and service credentials are configured. Native
+C/C++ and COBOL compile/test canaries ran, but mandatory dependency audits found
+unrated or incomplete external evidence and blocked the candidates. These are
+open qualification items, not claims that arbitrary repositories can publish.
+
 ## Release gates
 
 A production release is permitted only when all of these gates pass:
@@ -124,7 +169,13 @@ Create a protected `production` environment with required reviewers and these se
 - `AZURE_SUBSCRIPTION_ID`: production subscription.
 - `HEALTH_CHECK_TOKEN`: random value of at least 32 characters matching Key Vault.
 
-Set `AZURE_LOCATION` and `AZURE_RESOURCE_GROUP` as environment variables. Protect `main`, require the Quality gates, CodeQL, and Container security checks, require review, and disallow force pushes.
+Set `AZURE_LOCATION`, `AZURE_RESOURCE_GROUP`, `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID`
+as production environment variables. The Entra browser identity is distinct from
+the OIDC deployment identity. Also set `SERVICE_WEB_NAME`, `SERVICE_WORKER_NAME`,
+`SERVICE_OUTBOX_NAME`, `MIGRATION_JOB_NAME` and `AZURE_CONTAINER_REGISTRY_ENDPOINT`
+from the approved infrastructure outputs; the workflow validates those explicit
+resources without depending on local `azd` state. Protect `main`, require the Quality gates, CodeQL,
+and Container security checks, require review, and disallow force pushes.
 
 ## Required Azure configuration
 

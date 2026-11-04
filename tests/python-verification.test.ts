@@ -15,8 +15,10 @@ test("Python baseline vulnerabilities remain diagnostic but audit errors and can
   for(const bad of ["network timeout",'{"dependencies":[]}',JSON.stringify({dependencies:[{name:"unresolved",skip_reason:"not found",vulns:[]}]})]){
     assert.equal(pythonAuditFindings(bad),false);assert.equal(verificationStepAcceptable({...step,log:bad}),false);
   }
+  for(const bad of ["network timeout",JSON.stringify({dependencies:[{name:"unresolved",version:"1",skip_reason:"not found",vulns:[]}]})])assert.equal(verificationStepAcceptable({...step,exitCode:0,log:bad}),false);
+  assert.equal(verificationStepAcceptable({...step,exitCode:0,log:'{"dependencies":[]}'}),true);
   const files=[file("requirements.txt",""),file("tests/test_core.py","")];
-  const report=await verifySnapshot({baseline:files,candidate:files},async()=>{},undefined,async(index:number,cwd:string)=>({command:pythonVerificationCommands[index],exitCode:index===4&&cwd.includes("baseline")?1:0,timedOut:false,log,durationMs:1}));
+  const report=await verifySnapshot({baseline:files,candidate:files},async()=>{},undefined,async(index:number,cwd:string)=>({command:pythonVerificationCommands[index],exitCode:index===4&&cwd.includes("baseline")?1:0,timedOut:false,log:index===4&&!cwd.includes("baseline")?'{"dependencies":[]}':log,durationMs:1,tests:index===3?{tests:2,failed:0,skipped:0}:undefined}));
   assert.equal(report.status,"passed");assert.equal(reportPassed(report),true);assert.match(report.reason,/pre-existing baseline/);
 });
 test("detects Python projects without inventing an npm manifest",async()=>{
@@ -32,7 +34,7 @@ test("Python execution and server gate agree; npm parts cannot be omitted",async
   const {pythonCommands,verifySnapshot}=await import("../scripts/verification-runner.mjs");
   assert.deepEqual(pythonCommands,pythonVerificationCommands);
   const files=[file("requirements.txt","python-dotenv==1.0.1"),file("tests/test_core.py","import unittest")];
-  const result=await verifySnapshot({baseline:files,candidate:files},async()=>{},async()=>{throw Error("npm must not run");},async(index:number)=>({command:pythonCommands[index],exitCode:0,timedOut:false,log:"tests ran",durationMs:1}));
+  const result=await verifySnapshot({baseline:files,candidate:files},async()=>{},async()=>{throw Error("npm must not run");},async(index:number)=>({command:pythonCommands[index],exitCode:0,timedOut:false,log:index===4?'{"dependencies":[]}':"tests ran",durationMs:1,tests:index===3?{tests:2,failed:0,skipped:0}:undefined}));
   assert.equal(result.status,"passed");assert.equal(result.steps.length,10);assert.equal(reportPassed(result),true);
   assert.equal(reportMatchesSnapshot(result,{baseline:files,candidate:files}),true);
   assert.equal(reportMatchesSnapshot(result,{baseline:files,candidate:[...files,file("frontend/package.json","{}")]}),false);
@@ -49,7 +51,7 @@ test("Python test failure, audit failure and missing suites never become approva
     assert.equal(report.status,"failed");assert.equal(reportPassed(report),false);
     assert.ok(report.steps.some((step:{variant:string})=>step.variant==="candidate"));
   }
-  const report=await verifySnapshot({baseline:files.slice(0,1),candidate:files},async()=>{},undefined,async(index:number)=>({command:pythonCommands[index],exitCode:0,timedOut:false,log:"",durationMs:1}));
+  const report=await verifySnapshot({baseline:files.slice(0,1),candidate:files},async()=>{},undefined,async(index:number)=>({command:pythonCommands[index],exitCode:0,timedOut:false,log:index===4?'{"dependencies":[]}':"",durationMs:1,tests:index===3?{tests:2,failed:0,skipped:0}:undefined}));
   assert.equal(report.status,"unsupported");assert.match(report.reason,/no Python unittest tests/);
   const forged:VerificationReport={status:"passed",reason:"",steps:[]};assert.equal(reportMatchesSnapshot(forged,{baseline:files,candidate:files}),false);
 });
@@ -68,7 +70,7 @@ test("Python test dependencies execute separately and are mandatory when declare
   const {verifySnapshot,pythonTestDependenciesCommand:runnerCommand}=await import("../scripts/verification-runner.mjs");
   assert.equal(runnerCommand,pythonTestDependenciesCommand);
   const files=[file("requirements.txt","fastapi==0.115.0"),file("requirements-dev.txt","httpx==0.28.1"),file("tests/test_api.py","")];
-  const report=await verifySnapshot({baseline:files,candidate:files},async()=>{},undefined,async(index:number)=>({command:index===5?pythonTestDependenciesCommand:pythonVerificationCommands[index],exitCode:0,timedOut:false,log:"fixture",durationMs:1}));
+  const report=await verifySnapshot({baseline:files,candidate:files},async()=>{},undefined,async(index:number)=>({command:index===5?pythonTestDependenciesCommand:pythonVerificationCommands[index],exitCode:0,timedOut:false,log:index===4?'{"dependencies":[]}':"fixture",durationMs:1,tests:index===3?{tests:2,failed:0,skipped:0}:undefined}));
   assert.equal(report.steps.length,12);assert.equal(reportPassed(report),true);assert.equal(reportMatchesSnapshot(report,{baseline:files,candidate:files}),true);
   assert.equal(reportMatchesSnapshot({...report,steps:report.steps.filter((step:{command:string})=>step.command!==pythonTestDependenciesCommand)},{baseline:files,candidate:files}),false);
 });

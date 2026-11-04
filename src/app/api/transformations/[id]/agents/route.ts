@@ -5,6 +5,7 @@ import { query, transaction } from "@/lib/db";
 import { enqueueAgentInstruction } from "@/lib/queue";
 import {reserveRefinement} from "@/lib/run-coordination";
 import {appendAudit} from "@/lib/audit";
+import {assertNoCredentials,ContentPolicyError} from "@/lib/content-policy";
 
 const agentType=z.enum(["architect","frontend","backend","cloud","testing","security"]);
 const messageSchema=z.object({agentType,content:z.string().trim().min(1).max(12000)});
@@ -22,6 +23,7 @@ export async function GET(request:Request,context:{params:Promise<{id:string}>})
 
 export async function POST(request:Request,context:{params:Promise<{id:string}>}){
   try{const user=await requireUser(request,["Modernization.Admin"]);const{id}=await context.params;const input=messageSchema.parse(await request.json());
+    assertNoCredentials([{path:"agent instruction",content:input.content}]);
     await transaction(async(client)=>{
       try{await reserveRefinement(client,{runId:id,tenantId:user.tenantId,agentType:input.agentType,instruction:input.content,actorId:user.id});}
       catch(error){throw new AgentRunStateError(error instanceof Error?error.message:"Refinement unavailable.",409);}
@@ -33,4 +35,4 @@ export async function POST(request:Request,context:{params:Promise<{id:string}>}
   }catch(error){return failure(error)}
 }
 class AgentRunStateError extends Error{constructor(message:string,public status:number){super(message);}}
-function failure(error:unknown){if(error instanceof AuthError||error instanceof AgentRunStateError)return NextResponse.json({error:error.message},{status:error.status});if(error instanceof z.ZodError)return NextResponse.json({error:"Invalid agent instruction.",issues:error.issues},{status:400});console.error("Agent API failed",error);return NextResponse.json({error:"Agent operation failed."},{status:500})}
+function failure(error:unknown){if(error instanceof AuthError||error instanceof AgentRunStateError||error instanceof ContentPolicyError)return NextResponse.json({error:error.message},{status:error.status});if(error instanceof z.ZodError)return NextResponse.json({error:"Invalid agent instruction.",issues:error.issues},{status:400});console.error("Agent API failed",error);return NextResponse.json({error:"Agent operation failed."},{status:500})}

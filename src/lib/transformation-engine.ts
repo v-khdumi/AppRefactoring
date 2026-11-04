@@ -5,6 +5,8 @@ import { foundryModelParameters } from "@/lib/foundry-model";
 import { IncompleteGenerationError, readFoundryStream } from "@/lib/foundry-stream";
 import { agentGenerationPolicy, AgentOwnershipError, assertAgentChangeAreas, assertModernizationScope } from "@/lib/agent-policy";
 import {coordinationContractSchema,coordinationInstructions} from "./coordination-contract";
+import {scenarioForOptions,scenarioInstructions,scenarioRequirements,scenarioAcceptance,acceptanceManifestPath} from "./modernization-scenarios";
+import {assertNoCredentials} from "./content-policy";
 
 const changeSchema = z.object({
   path: z.string().min(1).max(500),
@@ -45,10 +47,13 @@ export async function generateTransformationPlan(input: {
   repository: string; scope: string; options: Record<string, unknown>;
   files: Array<{ path: string; content: string }>;
 }, onOutput?: (output: string) => Promise<void>, correctionFeedback?: string): Promise<GeneratedPlan> {
+  assertNoCredentials([...input.files,{path:"modernization options",content:JSON.stringify(input.options)}]);
   if (!env.AZURE_AI_FOUNDRY_ENDPOINT || !env.AZURE_AI_FOUNDRY_API_KEY) throw new Error("Microsoft Foundry is not configured.");
   const basePolicy = agentGenerationPolicy(input.options.agentType);
+  const scenario=scenarioForOptions(input.options);
+  const scenarioPolicy=`Modernization strategy: ${scenario}. ${scenarioInstructions(scenario)} Required strategy-specific checks: ${JSON.stringify(scenarioRequirements(scenario))}. The Testing Agent owns ${acceptanceManifestPath} and additive runtime-independent harnesses under tests/modernization/; other agents must only document expectations, not create test artifacts. ${basePolicy.agent==="testing"?`When required, create this manifest: {version:1,scenario:'${scenario}',checks:[{id:'unique-id',kind:'contract'|'integration'|'image-build'|'migration'|'rollback'|'data-parity'|'ai'|'authorization',project:'.',variants:['baseline','candidate'],command:'node',args:['tests/modernization/check.cjs'],report:{path:'.modernize-reports/check.json',format:'json'|'junit'|'tap'},timeoutSeconds:240}]}. JSON reports use Jest/Vitest counters numTotalTests,numPassedTests,numFailedTests,numPendingTests. Reports must be machine-readable, nonempty and have no skips. Do not add a manifest for upgrade/refactor unless it adds meaningful acceptance coverage.`:""} Do not invent a successful execution, change an original harness or weaken a check to obtain a pass.`;
   const policy={...basePolicy,instruction:`${basePolicy.instruction} The user scope is ${input.scope}. Never expand it. For frontend-only work preserve backend runtime and data; for backend-only work preserve frontend runtime. Shared manifest changes must be limited to dependencies of the selected layer. Read dependencyEvidence and manifests before selecting versions. Name lockfile, peer-dependency and runtime incompatibilities explicitly. Match existing cross-project API contracts; never invent an incompatible handoff as completed integration. Input files are the current candidate, including preceding agents' accepted work. Follow coordinationContract and precedingAgents; do not invent replacement endpoints or auth schemes. Return changes:[] with an explanation when no edit is needed. Never fabricate files to satisfy a minimum change count. ${input.options.requireCoordinationContract?coordinationInstructions:""}`};
-  const system = `You are a principal modernization engineer. Generate a conservative, buildable vertical slice. Never remove existing behavior, credentials, licensing, tests, or security controls. Never create binaries, lock files, generated output, CI secrets, or direct deployment actions. Return strict JSON: {summary:string,changes:[{path:string,oldPath?:string,status:'added'|'modified'|'deleted'|'renamed',area:'frontend'|'backend'|'platform'|'tests',rationale:string,before:string,after:string,validation:string[]}]}. Include complete after content for every changed text file. Set before to an empty string; the application binds it to the authoritative source snapshot. Use valid JSON escaping for quotes, backslashes and newlines in code strings. Never truncate file content or omit closing JSON delimiters. Prefer additions and adapters over destructive rewrites. ${policy.instruction}${correctionFeedback ? ` Your previous proposal failed server validation: ${correctionFeedback}. Generate a new complete, concise proposal from the original source within your assigned areas. Reduce the number of changed files rather than truncating content. This is the final correction attempt.` : ""}`;
+  const system = `You are a principal modernization engineer. Generate a conservative, buildable vertical slice. Never remove existing behavior, credentials, licensing, tests, or security controls. Never create binaries, lock files, generated output, CI secrets, or direct deployment actions. Return strict JSON: {summary:string,changes:[{path:string,oldPath?:string,status:'added'|'modified'|'deleted'|'renamed',area:'frontend'|'backend'|'platform'|'tests',rationale:string,before:string,after:string,validation:string[]}]}. Include complete after content for every changed text file. Set before to an empty string; the application binds it to the authoritative source snapshot. Use valid JSON escaping for quotes, backslashes and newlines in code strings. Never truncate file content or omit closing JSON delimiters. Prefer additions and adapters over destructive rewrites. ${policy.instruction} ${scenarioPolicy}${correctionFeedback ? ` Your previous proposal failed server validation: ${correctionFeedback}. Generate a new complete, concise proposal from the original source within your assigned areas. Reduce the number of changed files rather than truncating content. This is the final correction attempt.` : ""}`;
   const endpoint = env.AZURE_AI_FOUNDRY_ENDPOINT.replace(/\/$/, "");
   const response = await resilientFetch(`${endpoint}/chat/completions?api-version=${encodeURIComponent(process.env.AZURE_AI_FOUNDRY_API_VERSION || "2024-05-01-preview")}`, {
     method: "POST",
@@ -87,6 +92,12 @@ export async function generateTransformationPlan(input: {
   try {
     assertModernizationScope(input.scope,plan.changes);
     assertAgentChangeAreas(policy.agent, plan.changes);
+    if(policy.agent==="testing"){
+      const candidate=new Map(input.files.map(file=>[file.path,file.content]));
+      for(const change of plan.changes){if(change.status==="deleted")candidate.delete(change.path);else candidate.set(change.path,change.after);}
+      try{scenarioAcceptance([...candidate].map(([path,content])=>({path,content})),scenario,false);}
+      catch(error){throw new AgentOwnershipError(`Strategy acceptance is invalid: ${error instanceof Error?error.message:"Missing executable acceptance manifest."}`);}
+    }
   } catch (error) {
     if (!(error instanceof AgentOwnershipError) || correctionFeedback) throw error;
     if (onOutput) await onOutput(JSON.stringify({summary:`Ownership validation rejected the draft: ${error.message}. Requesting one corrected proposal.`,changes:[]}));
@@ -110,6 +121,7 @@ export function validateGeneratedPlan(plan: GeneratedPlan, source: Map<string, s
       change.before=source.get(change.oldPath)!;
     }
     if (/\0/.test(change.after) || Buffer.byteLength(change.after, "utf8") > 200_000) throw new Error(`Generated content is unsafe or oversized: ${change.path}`);
+    assertNoCredentials([{path:change.path,content:change.after}]);
     if (change.status === "modified" || change.status === "deleted") {
       const original = source.get(change.path);
       if (original === undefined) throw new Error(`Source consistency check failed: ${change.path}`);
@@ -125,5 +137,5 @@ export function normalizeRepositoryPath(path: string) {
 }
 
 export function isForbiddenRepositoryPath(path: string) {
-  return /(^|\/)(\.git|node_modules|bin|obj|dist|build|\.next)(\/|$)|(^|\/)(\.env|.*\.(pfx|p12|key|pem|exe|dll|zip|jar))$/i.test(path);
+  return /(^|\/)(\.git|node_modules|bin|obj|dist|build|\.next)(\/|$)|(^|\/)(\.env(?!\.example$|\.sample$)(?:\.[^/]+)?|.*\.(pfx|p12|key|pem|exe|dll|zip|jar))$/i.test(path);
 }

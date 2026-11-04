@@ -1,4 +1,4 @@
-import { mkdir, writeFile, open, chown, chmod, readdir, rm, rename } from "node:fs/promises";
+import { mkdir, writeFile, readFile, open, chown, chmod, readdir, rm, rename } from "node:fs/promises";
 import {constants,createWriteStream,existsSync} from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -7,9 +7,18 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 export function pythonProjectsFor(files) {
-  const manifests=files.filter(file=>file.path==="requirements.txt"||file.path.endsWith("/requirements.txt"));
-  if(manifests.length>8)throw new Error("Verification supports at most eight Python requirements projects.");
-  return manifests.map(file=>path.posix.dirname(file.path));
+  const units=pythonUnits(files.map(file=>file.path));
+  if(units.length>8)throw new Error("Verification supports at most eight Python projects.");
+  return units.map(unit=>unit.project);
+}
+export function pythonUnits(paths){
+  return manifestDirectories(paths,/(^|\/)(requirements\.txt|pyproject\.toml|Pipfile)$/).map(project=>{
+    const managers=[["poetry","poetry.lock","pyproject.toml"],["uv","uv.lock","pyproject.toml"],["pipenv","Pipfile.lock","Pipfile"]].filter(([,lock])=>paths.includes(local(project,lock)));
+    if(managers.length>1)throw new Error(`Ambiguous Python lock owners in ${project}.`);
+    if(managers.length){const [manager,lock,manifest]=managers[0];if(!paths.includes(local(project,manifest)))throw new Error(`Missing ${manager} manifest in ${project}.`);return {project,manager,lock:local(project,lock),manifest:local(project,manifest)};}
+    if(paths.includes(local(project,"Pipfile"))||paths.includes(local(project,"pyproject.toml")))throw new Error(`A reviewed Poetry, uv or Pipenv lock is required in ${project}; requirements.txt will not silently replace its manager.`);
+    return {project,manager:"requirements",manifest:local(project,"requirements.txt")};
+  });
 }
 
 export const pythonCommands=[
@@ -20,15 +29,32 @@ export const pythonCommands=[
   "pip-audit --path .verification-venv/lib/python3.11/site-packages --format json",
 ];
 export const pythonTestDependenciesCommand=".verification-venv/bin/python -m pip install --disable-pip-version-check --only-binary=:all: -c requirements.txt -r requirements-dev.txt";
+export const managedPythonCommands={
+  poetry:[pythonCommands[0],"poetry sync (locked; all groups; no root)",...pythonCommands.slice(2)],
+  uv:[pythonCommands[0],"uv sync --frozen --all-groups --no-install-project",...pythonCommands.slice(2)],
+  pipenv:["python3 -m venv .venv","pipenv sync --dev (locked)",".venv/bin/python -m compileall -q -x /[.]venv/ .",pythonCommands[3],"pip-audit --path .venv/lib/python3.11/site-packages --format json"],
+};
 export function pythonAuditFindings(log){
   try{
     const report=JSON.parse(log.slice(log.indexOf('{')));
     return Array.isArray(report.dependencies)&&report.dependencies.length>0&&report.dependencies.every(item=>typeof item.name==='string'&&typeof item.version==='string'&&!item.skip_reason&&Array.isArray(item.vulns)&&item.vulns.every(vuln=>typeof vuln.id==='string'&&vuln.id.length>0))&&report.dependencies.some(item=>item.vulns.length>0);
   }catch{return false;}
 }
-const unittestProgram=`import sys, unittest
+export function completePythonAudit(step){
+  if(step.timedOut||![0,1].includes(step.exitCode))return step;
+  try{
+    const text=step.output||step.log;
+    const report=JSON.parse(text.slice(text.indexOf("{")));
+    if(!Array.isArray(report.dependencies)||!report.dependencies.every(item=>typeof item.name==="string"&&typeof item.version==="string"&&!item.skip_reason&&Array.isArray(item.vulns)&&item.vulns.every(vuln=>typeof vuln.id==="string"&&vuln.id.length)))throw new Error("Unresolved packages or incomplete dependency inventory.");
+    const vulnerable=report.dependencies.some(item=>item.vulns.length);
+    if((step.exitCode===1)!==vulnerable)throw new Error("Audit exit status does not match the vulnerability inventory.");
+    return step;
+  }catch(error){return {...step,exitCode:2,log:`${step.log}\nPython dependency audit is incomplete: ${error.message}`.slice(-32000)};}
+}
+const unittestProgram=`import sys, unittest, json
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_*.py')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
+print('MODERNIZE_TEST_COUNTS ' + json.dumps(dict(tests=result.testsRun, failed=len(result.failures)+len(result.errors)+len(result.unexpectedSuccesses), skipped=len(result.skipped)+len(result.expectedFailures))))
 if result.testsRun == 0:
     print('No tests discovered; verification cannot pass.', file=sys.stderr)
 if result.skipped:
@@ -46,22 +72,69 @@ export async function runPythonCommand(index,cwd,uid){
     [".verification-venv/bin/python",["-m","pip","install","--disable-pip-version-check","--only-binary=:all:","-c","requirements.txt","-r","requirements-dev.txt"]],
   ];
   const [command,args]=commands[index];
-  return {...await executeCommand(command,args,cwd,uid),command:index===5?pythonTestDependenciesCommand:pythonCommands[index]};
+  let step={...await executeCommand(command,args,cwd,uid),command:index===5?pythonTestDependenciesCommand:pythonCommands[index]};
+  if(index===3)step=enforceExecutedTests(step,pythonTestCounts(step.log));
+  return step;
+}
+export function pythonTestCounts(output){
+  try{return JSON.parse(output.split("\n").findLast(line=>line.startsWith("MODERNIZE_TEST_COUNTS ")).slice("MODERNIZE_TEST_COUNTS ".length));}
+  catch{return {tests:0,failed:0,skipped:0};}
+}
+export async function runManagedPythonCommand(unit,index,cwd,uid,tools=defaultTools){
+  const venv=unit.manager==="pipenv"?".venv":".verification-venv";
+  const python=path.join(cwd,venv,"bin/python");
+  const env={VIRTUAL_ENV:path.join(cwd,venv),PATH:`${path.join(cwd,venv,"bin")}:/opt/verification-tools/bin:/usr/local/bin:/usr/bin:/bin`,UV_PROJECT_ENVIRONMENT:path.join(cwd,venv),UV_PYTHON_DOWNLOADS:"never",PIPENV_VENV_IN_PROJECT:"1",PIPENV_IGNORE_VIRTUALENVS:"1",POETRY_VIRTUALENVS_CREATE:"false",POETRY_NO_INTERACTION:"1"};
+  const invocations=[
+    {command:"python3",args:["-m","venv",venv]},
+    unit.manager==="poetry"?{command:"/opt/verification-tools/bin/poetry",args:["sync","--all-groups","--no-root","--no-interaction"]}:unit.manager==="uv"?{command:"/opt/verification-tools/bin/uv",args:["sync","--frozen","--all-groups","--no-install-project"]}:{command:"/opt/verification-tools/bin/pipenv",args:["sync","--dev"]},
+    {command:python,args:["-m","compileall","-q","-x",`/[.]${venv.slice(1)}/`,"."]},
+    {command:"xvfb-run",args:["--auto-servernum",python,"-c",unittestProgram]},
+    {command:"/opt/verification-tools/bin/pip-audit",args:["--path",path.join(cwd,venv,"lib/python3.11/site-packages"),"--format","json"]},
+  ];
+  const selected=invocations[index];
+  if(index===1&&unit.manager!=="poetry"){
+    const checked=await tools.execute(`/opt/verification-tools/bin/${unit.manager}`,unit.manager==="uv"?["lock","--check"]:["verify"],cwd,uid,900000,env);
+    if(checked.exitCode!==0||checked.timedOut)return {...checked,command:managedPythonCommands[unit.manager][index]};
+  }
+  let step={...await tools.execute(selected.command,selected.args,cwd,uid,900000,env),command:managedPythonCommands[unit.manager][index]};
+  if(index===3)step=enforceExecutedTests(step,pythonTestCounts(step.log));
+  return step;
+}
+
+export const nodeCommands={
+  npm:["npm ci --ignore-scripts --no-fund","npm run build","npm test -- --run","npm audit --omit=dev --audit-level=high"],
+  pnpm:["pnpm install --frozen-lockfile --ignore-scripts","pnpm run build","pnpm test (nonempty; no skips)","pnpm audit --prod --json"],
+  yarn:["yarn install (immutable lock; scripts disabled)","yarn run build","yarn test (nonempty; no skips)","Yarn production dependency audit (JSON)"],
+};
+export function nodeManager(manifest,paths,project="."){
+  const locks=[["npm","package-lock.json"],["pnpm","pnpm-lock.yaml"],["yarn","yarn.lock"]].filter(([,lock])=>paths.includes(local(project,lock)));
+  if(locks.length>1)throw new Error("Ambiguous JavaScript package managers: preserve one reviewed manager-owned lockfile.");
+  const declared=manifest.packageManager;
+  const match=typeof declared==="string"?declared.match(/^(npm|pnpm|yarn)@(\d+\.\d+\.\d+)(?:\+(sha(?:224|256|384|512))\.([a-f0-9]+))?$/):null;
+  if(declared&&!match)throw new Error("packageManager must pin a supported manager to an exact stable version.");
+  const name=match?.[1]||locks[0]?.[0]||"npm";
+  if(locks.length&&locks[0][0]!==name)throw new Error("Declared package manager does not own the source lockfile.");
+  if(name!=="npm"&&!match)throw new Error(`${name} requires an exact packageManager version; no manager version will be guessed.`);
+  if(match?.[3]&&match[4].length!==Number(match[3].slice(3))/4)throw new Error("packageManager has an invalid integrity digest.");
+  return {name,version:match?.[2],lock:local(project,name==="npm"?"package-lock.json":name==="pnpm"?"pnpm-lock.yaml":"yarn.lock"),...(name==="yarn"?{classic:match?.[2].startsWith("1.")}: {}),...(match?.[3]?{integrity:{algorithm:match[3],hex:match[4]}}:{})};
+}
+export function managerExecutable(manager){
+  return manager.version?`/opt/modernize/node-managers/${manager.name}-${manager.version}/node_modules/${manager.name==="yarn"&&!manager.classic?"@yarnpkg/cli-dist":manager.name}/bin/${manager.name==="yarn"?"yarn.js":manager.name==="pnpm"?"pnpm.cjs":"npm-cli.js"}`:"npm";
 }
 
 export function projectsFor(files,{requireScripts=true,requireLock=true}={}) {
   const paths=new Set(files.map(file=>file.path));
-  const manifests=files.filter(file=>file.path==="package.json"||file.path.endsWith("/package.json"));
+  const manifests=files.filter(file=>(file.path==="package.json"||file.path.endsWith("/package.json"))&&!ignoredManifestPath.test(file.path));
   if(!manifests.length)throw new Error("Unsupported repository: no Node/npm package.json found.");
   const root=manifests.find(file=>file.path==="package.json");
   const rootPackage=root?JSON.parse(Buffer.from(root.content,"base64").toString("utf8")):undefined;
-  const selected=rootPackage?.workspaces?[root]:manifests;
+  const selected=root&&(rootPackage?.workspaces||paths.has("pnpm-workspace.yaml"))?[root]:manifests;
   if(selected.length>8)throw new Error("Verification supports at most eight independently buildable npm projects.");
   return selected.map(file=>{
     const manifest=JSON.parse(Buffer.from(file.content,"base64").toString("utf8"));
     const project=path.posix.dirname(file.path);
-    const lock=project==="."?"package-lock.json":`${project}/package-lock.json`;
-    if(requireLock&&!paths.has(lock))throw new Error(`Missing ${lock}; reproducible npm ci cannot run.`);
+    const manager=nodeManager(manifest,[...paths],project);
+    if(requireLock&&!paths.has(manager.lock))throw new Error(`Missing ${manager.lock}; reproducible ${manager.name} install cannot run.`);
     if(requireScripts&&(typeof manifest.scripts?.build!=="string"||!manifest.scripts.build.trim()||typeof manifest.scripts?.test!=="string"||!manifest.scripts.test.trim()))throw new Error(`${file.path} must define nonempty build and test scripts.`);
     return project;
   });
@@ -82,9 +155,16 @@ export const mavenCommands=["mvn -B -DskipTests package","mvn -B test (JUnit rep
 export const gradleCommands=["gradle assemble","gradle test (JUnit reports; nonempty; no skips)","Gradle runtime dependency audit (runtimeClasspath + OSV)"];
 export const goCommands=["go mod download","go build ./...","go test -json ./... (nonempty; no skips)","govulncheck ./..."];
 export const phpCommands=["composer install --no-interaction --no-progress --prefer-dist --no-scripts","php -l (all project PHP files)","phpunit --log-junit (nonempty; no skips)","composer audit --locked --no-dev --format=json"];
-export const ecosystemCommands={dotnet:dotnetCommands,maven:mavenCommands,gradle:gradleCommands,go:goCommands,php:phpCommands};
+export const rustCommands=["cargo fetch --locked","cargo build --locked --workspace --all-targets","cargo test --locked --workspace (nonempty; no skips)","Cargo locked dependency audit (metadata + OSV)"];
+export const rubyCommands=["bundle install (frozen source lock)","Ruby syntax compilation","Ruby test suites (RSpec/Minitest; nonempty; no skips)","Ruby locked dependency audit (Bundler + OSV)"];
+export const cppCommands=["cmake configure (Release; system dependencies only)","cmake --build .modernize-build --config Release","ctest (JUnit reports; nonempty; no skips)","Native dependency audit (compiler inventory + Debian OSV)"];
+export const cobolCommands=["cobc -x (all declared programs)","COBOL executable contracts (nonempty; no skips)","Native dependency audit (GnuCOBOL inventory + Debian OSV)"];
+export const ecosystemCommands={dotnet:dotnetCommands,maven:mavenCommands,gradle:gradleCommands,go:goCommands,php:phpCommands,rust:rustCommands,ruby:rubyCommands,cpp:cppCommands,cobol:cobolCommands};
 export const auditFindingsPrefix="MODERNIZE_AUDIT_FINDINGS ";
 export const toolchains={
+  nativeDebian:{ruby:"3.1.2-7+deb12u1",cmake:"3.25.1-1",gnucobol:"3.1.2-5+b1",gcc:"4:12.2.0-3",gcc12:"12.2.0-14+deb12u1",make:"4.3-4.1",binutils:"2.40-2"},
+  rustup:{version:"1.28.2",url:"https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",sha256:"20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"},
+  pythonManagers:{poetry:"2.2.1",uv:"0.9.9",pipenv:"2025.0.4"},
   dotnetSdk:{version:"10.0.401",url:"https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-linux-x64.tar.gz",sha512:"51c8b999af9e8dd9998c9edc5944e19a90788862068acd38694e098889054ce8c23d4f0c5cccfa16bf187d044562359e5ee69a9f8ad0bbe913ba90311fbce25b"},
   dotnetInstall:{url:"https://raw.githubusercontent.com/dotnet/install-scripts/e5cf1dd2d1540ed05ac84f8eb8c5cdec2807621e/src/dotnet-install.sh",sha256:"082f7685e156738a1b2e2ed8381a621870d4ce8e8c59278034556f05c186eb2e"},
   temurin:{
@@ -106,6 +186,9 @@ export const toolchains={
 const dotnetProject=/\.(csproj|fsproj|vbproj)$/i;
 const dotnetSolution=/\.(sln|slnx)$/i;
 const ignoredManifestPath=/(^|\/)(vendor|node_modules|testdata|\.git)\//;
+export function isImmutableOriginalTest(value){
+  return /(^|\/)(tests?|spec|__tests__)\/|\.(test|spec)\.[^/]+$|_test\.(go|rb)$|(^|\/)[^/]*\.(?:Unit|Integration)?Tests?\//.test(value)&&!/\.(csproj|fsproj|vbproj)$|(^|\/)(pom\.xml|build\.gradle(\.kts)?|package\.json|Cargo\.toml|CMakeLists\.txt|phpunit\.xml(\.dist)?|Directory\.Build\.(props|targets))$/i.test(value);
+}
 const decoded=file=>file?Buffer.from(file.content,"base64").toString("utf8"):"";
 const inUnit=(project,filePath)=>project==="."||filePath.startsWith(`${project}/`);
 const local=(project,name)=>project==="."?name:`${project}/${name}`;
@@ -124,7 +207,34 @@ export function ecosystemUnits(paths){
     ...gradle.map(project=>({runtime:"gradle",project})),
     ...manifestDirectories(paths,/(^|\/)go\.mod$/).map(project=>({runtime:"go",project})),
     ...manifestDirectories(paths,/(^|\/)composer\.json$/).map(project=>({runtime:"php",project})),
+    ...manifestRoots(paths,/(^|\/)Cargo\.toml$/).map(project=>({runtime:"rust",project})),
+    ...manifestDirectories(paths,/(^|\/)Gemfile$/).map(project=>({runtime:"ruby",project})),
+    ...manifestRoots(paths,/(^|\/)CMakeLists\.txt$/).map(project=>({runtime:"cpp",project})),
+    ...(paths.some(item=>/\.(cob|cbl|cobol|cpy)$/i.test(item)&&!ignoredManifestPath.test(item))?[{runtime:"cobol",project:"."}]:[]),
   ];
+}
+export function blockedRuntimeReasons(paths){
+  const reasons=[];
+  if(paths.some(item=>/(^|\/)(Rakefile|[^/]+\.(gemspec|rb|rake))$/i.test(item)&&!ignoredManifestPath.test(item))&&!paths.some(item=>/(^|\/)Gemfile$/.test(item)))reasons.push("Ruby requires a Gemfile and reviewed Gemfile.lock; standalone Ruby has no complete dependency inventory.");
+  if(paths.some(item=>/(^|\/)(meson\.build|conanfile\.(txt|py)|conan\.lock|vcpkg\.json|[^/]+\.vcxproj)$/i.test(item)&&!ignoredManifestPath.test(item)))reasons.push("C/C++: Meson, Conan, vcpkg and MSVC dependency/build adapters remain unqualified; their locks cannot be ignored.");
+  if(paths.some(item=>/\.(c|cc|cpp|cxx|h|hpp)$/i.test(item)&&!ignoredManifestPath.test(item))&&!paths.some(item=>/(^|\/)CMakeLists\.txt$/.test(item)))reasons.push("C/C++ requires CMake and a complete system dependency inventory; other native builds remain blocked.");
+  return reasons;
+}
+export function bundlerVersion(files,project){
+  const lock=files.find(file=>file.path===local(project,"Gemfile.lock"));
+  const version=decoded(lock).match(/^BUNDLED WITH\s*\r?\n\s+(\d+\.\d+\.\d+)\s*$/m)?.[1];
+  if(!version)throw new Error(`Ruby requires the source Gemfile.lock with an exact BUNDLED WITH version: ${project}`);
+  const declared=decoded(files.find(file=>file.path===local(project,".ruby-version"))).trim().replace(/^ruby-/,"")||decoded(files.find(file=>file.path===local(project,"Gemfile"))).match(/^\s*ruby\s+["']([^"']+)["']/m)?.[1];
+  if(declared&&declared!=="3.1.2")throw new Error(`Ruby ${declared} is not qualified by the pinned Ruby 3.1.2 Debian toolchain.`);
+  return version;
+}
+export function rustVersion(files,project){
+  const file=files.find(file=>file.path===local(project,"rust-toolchain.toml"))||files.find(file=>file.path===local(project,"rust-toolchain"))||files.find(file=>file.path==="rust-toolchain.toml"||file.path==="rust-toolchain");
+  if(!file)return "1.90.0";
+  const content=decoded(file).trim();
+  const version=file.path.endsWith(".toml")?content.match(/^\s*channel\s*=\s*["']([^"']+)["']/m)?.[1]:content;
+  if(!/^\d+\.\d+\.\d+$/.test(version||""))throw new Error("Rust requires an exact stable rust-toolchain version; floating channels are not reproducible.");
+  return version;
 }
 
 const jdkFeatures=[8,11,17,21,25];
@@ -196,9 +306,14 @@ export function dotnetRequirements(files){
 }
 
 export function toolchainPlan(snapshot){
-  const plan={dotnet:null,java:new Set(),maven:false,gradle:false,go:false,php:new Set()};
+  const plan={dotnet:null,java:new Set(),maven:false,gradle:false,go:false,php:new Set(),rust:new Set(),nodeManagers:new Map(),pythonManagers:new Set(),ruby:new Set(),cpp:false,cobol:false};
   for(const variant of ["baseline","candidate"]){
     const files=snapshot[variant]||[];const paths=files.map(file=>file.path);
+    for(const unit of pythonUnits(paths))plan.pythonManagers.add(unit.manager);
+    if(paths.some(item=>/(^|\/)package\.json$/.test(item)))for(const project of projectsFor(files,{requireScripts:false,requireLock:variant==="baseline"})){
+      const manager=nodeManager(JSON.parse(decoded(files.find(file=>file.path===local(project,"package.json")))),paths,project);
+      if(manager.version)plan.nodeManagers.set(`${manager.name}-${manager.version}`,manager);
+    }
     for(const unit of ecosystemUnits(paths)){
       if(unit.runtime==="dotnet")plan.dotnet=true;
       if(unit.runtime==="maven"||unit.runtime==="gradle"){
@@ -208,13 +323,17 @@ export function toolchainPlan(snapshot){
       }
       if(unit.runtime==="go")plan.go=true;
       if(unit.runtime==="php")plan.php.add(phpVersion(files,unit.project));
+      if(unit.runtime==="rust")plan.rust.add(rustVersion(files,unit.project));
+      if(unit.runtime==="ruby")plan.ruby.add(bundlerVersion(files,unit.project));
+      if(unit.runtime==="cpp")plan.cpp=true;
+      if(unit.runtime==="cobol")plan.cobol=true;
     }
   }
   if(plan.dotnet)plan.dotnet=dotnetRequirements([...(snapshot.baseline||[]),...(snapshot.candidate||[])]);
   if(plan.php.size)plan.php.add("8.5");
   return plan;
 }
-export function toolchainsRequired(plan){return Boolean(plan.dotnet||plan.java.size||plan.go||plan.php.size);}
+export function toolchainsRequired(plan){return Boolean(plan.dotnet||plan.java.size||plan.go||plan.php.size||plan.rust?.size||plan.nodeManagers?.size||plan.pythonManagers?.size||plan.ruby?.size||plan.cpp||plan.cobol);}
 
 export async function downloadVerified(url,algorithm,expected,destination){
   const response=await fetch(url,{redirect:"follow",signal:AbortSignal.timeout(900000)});
@@ -242,8 +361,8 @@ allprojects { modernizeProject ->
 }
 `;
 
-async function setupCommand(command,args,timeoutMs=900000){
-  const result=await executeCommand(command,args,"/tmp",0,timeoutMs,{PATH:"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"});
+async function setupCommand(command,args,timeoutMs=900000,extraEnv={}){
+  const result=await executeCommand(command,args,"/opt",0,timeoutMs,{PATH:"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",...extraEnv});
   if(result.exitCode!==0||result.timedOut)throw new Error(`Toolchain setup failed: ${command} ${args.join(" ")}. ${result.log.slice(-1500)}`);
 }
 export async function ensureOwnedDirectory(directory,uid){
@@ -255,9 +374,64 @@ export async function installToolchains(plan){
   const packages=["ca-certificates","unzip","xz-utils"];
   if(plan.dotnet)packages.push("libicu72","libssl3","zlib1g","curl");
   if(plan.go)packages.push("gcc","libc6-dev");
+  if(plan.rust?.size)packages.push("gcc","libc6-dev","pkg-config","libssl-dev");
+  if(plan.pythonManagers?.size)packages.push("python3","python3-venv","python3-tk","xvfb","xauth","libasound2","libssl3");
+  if(plan.ruby?.size||plan.cpp||plan.cobol)packages.push(`gcc=${toolchains.nativeDebian.gcc}`,`g++=${toolchains.nativeDebian.gcc}`,`gcc-12=${toolchains.nativeDebian.gcc12}`,`g++-12=${toolchains.nativeDebian.gcc12}`,`make=${toolchains.nativeDebian.make}`,`binutils=${toolchains.nativeDebian.binutils}`,"libc6-dev","python3");
+  if(plan.ruby?.size)packages.push(`ruby3.1=${toolchains.nativeDebian.ruby}`,`ruby3.1-dev=${toolchains.nativeDebian.ruby}`,"zlib1g-dev");
+  if(plan.cpp)packages.push(`cmake=${toolchains.nativeDebian.cmake}`);
+  if(plan.cobol)packages.push(`gnucobol3=${toolchains.nativeDebian.gnucobol}`);
   await setupCommand("apt-get",["update"]);
   await setupCommand("apt-get",["install","-y","--no-install-recommends",...packages]);
   await mkdir("/opt/modernize",{recursive:true,mode:0o755});
+  for(const version of plan.ruby||[]){
+    const response=await fetch(`https://rubygems.org/api/v2/rubygems/bundler/versions/${version}.json`,{signal:AbortSignal.timeout(60000)});
+    if(!response.ok)throw new Error(`Cannot verify pinned Bundler ${version}.`);
+    const metadata=await response.json();
+    if(metadata.version!==version||!/^[a-f0-9]{64}$/.test(metadata.sha||""))throw new Error("Missing RubyGems SHA-256 metadata.");
+    const archive=`/opt/modernize/bundler-${version}.gem`;
+    await downloadVerified(`https://rubygems.org/downloads/bundler-${version}.gem`,"sha256",metadata.sha,archive);
+    await setupCommand("gem3.1",["install","--local",archive,"--no-document","--install-dir","/opt/modernize/ruby-gems"]);
+    await rm(archive,{force:true});
+    const checked=await executeCommand("ruby3.1",["-e",`gem 'bundler','= ${version}'; require 'bundler'; puts Bundler::VERSION`],"/opt",0,30000,{GEM_PATH:"/opt/modernize/ruby-gems"});
+    if(checked.exitCode!==0||checked.log.trim()!==version)throw new Error(`Bundler ${version} could not verify its executable version.`);
+  }
+  for(const [enabled,command,expected] of [[plan.ruby?.size,"ruby3.1","3.1.2"],[plan.cpp,"cmake","3.25.1"],[plan.cobol,"cobc","3.1.2"],[plan.ruby?.size||plan.cpp||plan.cobol,"gcc","12.2.0"],[plan.ruby?.size||plan.cpp||plan.cobol,"g++","12.2.0"],[plan.ruby?.size||plan.cpp||plan.cobol,"make","4.3"],[plan.ruby?.size||plan.cpp||plan.cobol,"ld","2.40"]]){
+    if(!enabled)continue;
+    const checked=await executeCommand(command,["--version"],"/opt",0,30000);
+    if(checked.exitCode!==0||!checked.log.includes(expected))throw new Error(`The pinned ${command} version did not verify.`);
+  }
+  for(const [key,manager] of plan.nodeManagers||[]){
+    const packageName=manager.name==="yarn"&&!manager.classic?"@yarnpkg/cli-dist":manager.name;
+    const metadataResponse=await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/${manager.version}`,{signal:AbortSignal.timeout(60000)});
+    if(!metadataResponse.ok)throw new Error(`Cannot verify pinned package manager ${key}.`);
+    const metadata=await metadataResponse.json();
+    if(metadata.name!==packageName||metadata.version!==manager.version||!/^https:\/\/registry\.npmjs\.org\//.test(metadata.dist?.tarball||"")||!/^sha512-[A-Za-z0-9+/=]+$/.test(metadata.dist?.integrity||""))throw new Error(`Incomplete registry integrity metadata for ${key}.`);
+    const archive=`/opt/modernize/${key}.tgz`;
+    await downloadVerified(metadata.dist.tarball,"sha512",Buffer.from(metadata.dist.integrity.slice(7),"base64").toString("hex"),archive);
+    if(manager.integrity&&createHash(manager.integrity.algorithm).update(await readFile(archive)).digest("hex")!==manager.integrity.hex)throw new Error(`Source-declared packageManager integrity mismatch for ${key}.`);
+    await setupCommand("npm",["install","--prefix",`/opt/modernize/node-managers/${key}`,"--ignore-scripts","--no-audit","--no-fund","--engine-strict",archive]);
+    await rm(archive,{force:true});
+    const version=await executeCommand(managerExecutable(manager),["--version"],"/opt",0,30000,{YARN_IGNORE_PATH:"1"});
+    if(version.exitCode!==0||version.log.trim()!==manager.version)throw new Error(`The pinned ${key} executable did not verify its version.`);
+  }
+  if(plan.pythonManagers?.size){
+    await setupCommand("python3",["-m","venv","/opt/verification-tools"]);
+    await setupCommand("/opt/verification-tools/bin/python",["-m","pip","install","--disable-pip-version-check","--only-binary=:all:","pip-audit==2.9.0",...[...plan.pythonManagers].filter(manager=>manager!=="requirements").map(manager=>`${manager}==${toolchains.pythonManagers[manager]}`)]);
+    for(const manager of plan.pythonManagers)if(manager!=="requirements"){
+      const version=await executeCommand(`/opt/verification-tools/bin/${manager}`,["--version"],"/opt",0,30000);
+      if(version.exitCode!==0||!version.log.includes(toolchains.pythonManagers[manager]))throw new Error(`The pinned ${manager} version could not be verified.`);
+    }
+  }
+  if(plan.rust?.size){
+    const bootstrap="/opt/modernize/rustup-init";
+    await downloadVerified(toolchains.rustup.url,"sha256",toolchains.rustup.sha256,bootstrap);
+    await chmod(bootstrap,0o700);
+    const env={RUSTUP_HOME:"/opt/rustup",CARGO_HOME:"/opt/cargo"};
+    await setupCommand(bootstrap,["-y","--no-modify-path","--profile","minimal","--default-toolchain","none"],900000,env);
+    for(const version of plan.rust)await setupCommand("/opt/cargo/bin/rustup",["toolchain","install",version,"--profile","minimal","--no-self-update"],900000,env);
+    await setupCommand("chmod",["-R","a+rX","/opt/rustup","/opt/cargo"]);
+    await rm(bootstrap,{force:true});
+  }
   if(plan.dotnet){
     const archive="/opt/modernize/dotnet-sdk.tar.gz";
     await downloadVerified(toolchains.dotnetSdk.url,"sha512",toolchains.dotnetSdk.sha512,archive);
@@ -350,7 +524,18 @@ export async function readOwnedReports(root,pattern,{maxFiles=500,maxBytes=64_00
 }
 export function junitCounts(documents){
   let tests=0,skipped=0,failed=0;
-  for(const {content} of documents){tests+=(content.match(/<testcase\b/g)||[]).length;skipped+=(content.match(/<skipped\b/g)||[]).length;failed+=(content.match(/<(?:failure|error)\b/g)||[]).length;}
+  for(const {content} of documents){
+    let documentSkipped=0,documentFailed=0;
+    for(const match of content.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase\s*>)/g)){
+      tests++;
+      if(/<(?:skipped|ignored)\b/i.test(match[2]||"")||/\bstatus=["'](?:disabled|notrun|skipped|ignored|pending)["']/i.test(match[1]))documentSkipped++;
+      if(/<(?:failure|error)\b/i.test(match[2]||"")||/\bstatus=["'](?:failed|failure|error|timeout)["']/i.test(match[1]))documentFailed++;
+    }
+    const suites=[...content.matchAll(/<testsuite\b[^>]*>/g)].map(match=>match[0]);
+    const maximum=names=>Math.max(0,...suites.flatMap(suite=>names.map(name=>Number(suite.match(new RegExp(`\\b${name}=["'](\\d+)["']`))?.[1]||0))));
+    skipped+=Math.max(documentSkipped,maximum(["skipped","disabled"]));
+    failed+=Math.max(documentFailed,maximum(["failures","errors"]));
+  }
   return {tests,skipped,failed};
 }
 export function trxCounts(documents){
@@ -373,9 +558,25 @@ export function goTestCounts(output){
   return {tests,skipped,failed};
 }
 export function enforceExecutedTests(step,counts){
-  const passed=step.exitCode===0&&!step.timedOut&&counts.tests>0&&counts.failed===0&&counts.skipped===0;
+  const valid=counts&&[counts.tests,counts.failed,counts.skipped].every(value=>Number.isSafeInteger(value)&&value>=0);
+  if(!valid)counts={tests:0,failed:0,skipped:0};
+  const passed=valid&&step.exitCode===0&&!step.timedOut&&counts.tests>0&&counts.failed===0&&counts.skipped===0;
   const notes=[`Executed tests: ${counts.tests}; failed: ${counts.failed}; skipped: ${counts.skipped}.`,counts.tests===0?"No tests were executed; verification cannot pass.":"",counts.skipped?"Skipped tests leave required coverage unverified.":""].filter(Boolean).join(" ");
-  return {...step,exitCode:passed?0:step.exitCode&&step.exitCode!==0?step.exitCode:1,log:`${step.log}\n${notes}`.slice(-32000)};
+  return {...step,tests:counts,exitCode:passed?0:step.exitCode&&step.exitCode!==0?step.exitCode:1,log:`${step.log}\n${notes}`.slice(-32000)};
+}
+export function npmTestCounts(output,format="tap"){
+  if(format==="json"){
+    const report=JSON.parse(output);
+    const values=[report.numTotalTests,report.numFailedTests,report.numPendingTests,report.numPassedTests,report.numTodoTests??0];
+    if(values.some(value=>!Number.isSafeInteger(value)||value<0))throw new Error("The npm test reporter returned invalid test counters.");
+    const [tests,failed,pending,passed,todo]=values;
+    if(passed+failed+pending!==tests||todo>pending)throw new Error("The npm test reporter returned inconsistent test counters.");
+    return {tests,failed,skipped:pending};
+  }
+  const count=name=>{const match=output.match(new RegExp(`^(?:#\\s*|ℹ\\s*)${name}\\s+(\\d+)\\s*$`,"m"));if(!match)throw new Error(`The npm test output has no machine-readable ${name} counter. Use Vitest, Jest, or a Node TAP reporter.`);return Number(match[1]);};
+  const tests=count("tests"),failed=count("fail")+count("cancelled"),skipped=count("skipped")+count("todo"),passed=count("pass");
+  if(passed+failed+skipped!==tests)throw new Error("The npm TAP reporter returned inconsistent test counters.");
+  return {tests,failed,skipped};
 }
 export function auditStep(step,findings){
   const normalized=findings.map(item=>{const severity=String(item.severity||"unknown").toLowerCase().replace("moderate","medium");return {package:String(item.package),version:String(item.version||""),id:String(item.id),severity,blocking:["high","critical","unknown"].includes(severity)};});
@@ -387,25 +588,57 @@ export async function osvFindings(ecosystem,packages,fetcher=fetch){
   const unique=[...new Map(packages.map(item=>[`${item.name}@${item.version}`,item])).values()];
   if(unique.length>5000)throw new Error("Dependency inventory exceeds the audit limit.");
   const advisories=new Map();
+  const details=new Map();
+  const collect=(vulnerability,item)=>{
+    if(typeof vulnerability?.id!=="string"||!vulnerability.id)throw new Error("OSV returned an advisory without an identifier.");
+    const affected=advisories.get(vulnerability.id)||[];
+    if(!affected.some(previous=>previous.name===item.name&&previous.version===item.version))affected.push(item);
+    advisories.set(vulnerability.id,affected);
+    if(vulnerability.affected)details.set(vulnerability.id,vulnerability);
+    if(advisories.size>10000)throw new Error("OSV returned more than 10000 advisories; the bounded audit cannot complete.");
+  };
   for(let offset=0;offset<unique.length;offset+=500){
     const chunk=unique.slice(offset,offset+500);
     const response=await fetcher("https://api.osv.dev/v1/querybatch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({queries:chunk.map(item=>({package:{ecosystem,name:item.name},version:item.version}))}),signal:AbortSignal.timeout(60000)});
     if(!response.ok)throw new Error(`OSV query failed (${response.status}).`);
     const body=await response.json();
     if(!Array.isArray(body.results)||body.results.length!==chunk.length)throw new Error("OSV returned an incomplete result set.");
-    body.results.forEach((result,index)=>{
-      if(result.next_page_token)throw new Error("OSV returned paginated results; the audit is incomplete.");
-      for(const vulnerability of result.vulns||[]){const affected=advisories.get(vulnerability.id)||[];affected.push(chunk[index]);advisories.set(vulnerability.id,affected);}
-    });
+    for(let index=0;index<body.results.length;index++){
+      const result=body.results[index],item=chunk[index];
+      if(!result||result.vulns!==undefined&&!Array.isArray(result.vulns))throw new Error("OSV returned an invalid vulnerability page.");
+      for(const vulnerability of result.vulns||[])collect(vulnerability,item);
+      if(result.next_page_token){
+        let token;
+        const seen=new Set();
+        for(let page=0;page<100;page++){
+          const response=await fetcher("https://api.osv.dev/v1/query",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({package:{ecosystem,name:item.name},version:item.version,...(token?{page_token:token}:{})}),signal:AbortSignal.timeout(60000)});
+          if(!response.ok)throw new Error(`OSV paginated query failed (${response.status}).`);
+          const next=await response.json();
+          if(next.vulns!==undefined&&!Array.isArray(next.vulns))throw new Error("OSV returned an invalid paginated vulnerability set.");
+          for(const vulnerability of next.vulns||[])collect(vulnerability,item);
+          token=next.next_page_token;
+          if(!token)break;
+          if(typeof token!=="string"||seen.has(token))throw new Error("OSV returned a repeated or invalid pagination cursor.");
+          seen.add(token);
+          if(page===99)throw new Error("OSV audit exceeded 100 result pages; no findings were waived.");
+        }
+      }
+    }
   }
-  if(advisories.size>300)throw new Error("Too many advisories to evaluate completely.");
   const findings=[];
   for(const [id,affected] of advisories){
-    const response=await fetcher(`https://api.osv.dev/v1/vulns/${encodeURIComponent(id)}`,{signal:AbortSignal.timeout(30000)});
-    if(!response.ok)throw new Error(`OSV advisory lookup failed for ${id}.`);
-    const advisory=await response.json();
+    let advisory=details.get(id);
+    if(!advisory){
+      const response=await fetcher(`https://api.osv.dev/v1/vulns/${encodeURIComponent(id)}`,{signal:AbortSignal.timeout(30000)});
+      if(!response.ok)throw new Error(`OSV advisory lookup failed for ${id}.`);
+      advisory=await response.json();
+    }
     if(advisory.withdrawn)continue;
-    for(const item of affected)findings.push({package:item.name,version:item.version,id,severity:advisory.database_specific?.severity||"unknown"});
+    for(const item of affected){
+      const urgency=ecosystem==="Debian:12"?advisory.affected?.find(entry=>entry.package?.ecosystem===ecosystem&&entry.package?.name===item.name)?.ecosystem_specific?.urgency:undefined;
+      const severity=advisory.database_specific?.severity||({unimportant:"low",low:"low",medium:"medium",high:"high"}[urgency])||"unknown";
+      findings.push({package:item.name,version:item.version,id,severity});
+    }
   }
   return findings;
 }
@@ -453,9 +686,209 @@ function evaluated(step,evaluate){
   try{return evaluate();}catch(error){return {...step,exitCode:2,log:`${step.log}\nThe tool output could not be evaluated: ${error.message}`.slice(-32000)};}
 }
 
+export function rustTestCounts(output){
+  let tests=0,failed=0,skipped=0;
+  for(const match of output.matchAll(/^test result: (?:ok|FAILED)\.\s+(\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out/gm)){
+    const values=match.slice(1).map(Number);
+    tests+=values.reduce((sum,value)=>sum+value,0);failed+=values[1];skipped+=values[2]+values[3]+values[4];
+  }
+  return {tests,failed,skipped};
+}
+export function cargoDependencies(output){
+  const metadata=JSON.parse(output);
+  if(!Array.isArray(metadata.packages)||!Array.isArray(metadata.workspace_members))throw new Error("Cargo metadata is incomplete.");
+  return metadata.packages.flatMap(item=>{
+    if(metadata.workspace_members.includes(item.id))return [];
+    if(item.source!=="registry+https://github.com/rust-lang/crates.io-index")throw new Error(`Unauditable Cargo source for ${item.name}; git, external path and custom registry dependencies are blocked.`);
+    if(typeof item.name!=="string"||typeof item.version!=="string")throw new Error("Invalid Cargo dependency.");
+    return [{name:item.name,version:item.version}];
+  });
+}
+export function rubyTestCounts(output,format="minitest"){
+  if(format==="rspec"){
+    const report=JSON.parse(output);
+    if(!Array.isArray(report.examples)||report.examples.length!==report.summary?.example_count)throw new Error("RSpec example inventory is incomplete.");
+    const counts={tests:report.summary.example_count,failed:report.summary.failure_count,skipped:report.summary.pending_count};
+    for(const [status,key] of [["failed","failed"],["pending","skipped"]])if(report.examples.filter(item=>item.status===status).length!==counts[key])throw new Error("RSpec summary counters are inconsistent.");
+    return counts;
+  }
+  const line=output.split("\n").findLast(line=>line.startsWith("MODERNIZE_RUBY_TEST_COUNTS "));
+  if(!line)throw new Error("Minitest did not emit executed test counters.");
+  return JSON.parse(line.slice("MODERNIZE_RUBY_TEST_COUNTS ".length));
+}
+const minitestProgram=`require 'json'
+require 'minitest/autorun'
+Minitest::SummaryReporter.prepend(Module.new do
+  def report
+    super
+    puts 'MODERNIZE_RUBY_TEST_COUNTS ' + JSON.generate(tests: count, failed: failures + errors, skipped: skips)
+  end
+end)
+files=ARGV.dup
+ARGV.clear
+files.each { |file| require File.expand_path(file) }
+`;
+export function nativePolicy(files,project){
+  const scoped=files.filter(file=>inUnit(project,file.path));
+  if(scoped.some(file=>/(^|\/)(vendor|third_party|third-party|external)\//i.test(file.path)))throw new Error("Vendored native dependencies have no qualified version inventory; audit remains blocked.");
+  for(const file of scoped.filter(file=>/(^|\/)CMakeLists\.txt$|\.cmake$/i.test(file.path))){
+    const content=decoded(file).replace(/#[^\n]*/g,"");
+    if(/\b(FetchContent|ExternalProject|CPMAddPackage|pkg_check_modules)\b|\bfile\s*\(\s*DOWNLOAD\b|\b(execute_process|add_custom_command|add_custom_target|cmake_language)\s*\(/i.test(content)||[...content.matchAll(/\bfind_package\s*\(\s*([^\s)]+)/gi)].some(match=>match[1]!=="Threads"))throw new Error(`${file.path}: external CMake dependency/process mechanisms have no complete qualified audit inventory.`);
+  }
+}
+export function cobolContracts(files){
+  const manifest=files.find(file=>file.path==="tests/cobol-contracts.json");
+  if(!manifest)throw new Error("Reviewed tests/cobol-contracts.json is required.");
+  const config=JSON.parse(decoded(manifest));
+  if(Buffer.byteLength(JSON.stringify(config))>100000)throw new Error("COBOL executable contracts exceed the bounded 100 KB command payload.");
+  if(config.version!==1||!Array.isArray(config.programs)||!config.programs.length||config.programs.length>8||!Array.isArray(config.tests)||!config.tests.length||config.tests.length>64||Object.keys(config).some(key=>!["version","programs","tests"].includes(key)))throw new Error("COBOL contracts require 1-8 programs and 1-64 executable tests.");
+  const sources=files.filter(file=>/\.(cob|cbl|cobol)$/i.test(file.path)&&!ignoredManifestPath.test(file.path)).map(file=>file.path);
+  const names=new Set();
+  for(const program of config.programs){
+    if(typeof program.name!=="string"||!/^[a-zA-Z0-9_-]{1,60}$/.test(program.name)||names.has(program.name)||!Array.isArray(program.sources)||!program.sources.length||program.sources.length>100||program.sources.some(source=>!sources.includes(source))||program.format!==undefined&&!["fixed","free"].includes(program.format)||Object.keys(program).some(key=>!["name","sources","format"].includes(key)))throw new Error("Invalid/duplicate COBOL program or original source path.");
+    names.add(program.name);
+    if(!config.tests.some(test=>test.program===program.name))throw new Error(`COBOL program ${program.name} has no executable contract.`);
+  }
+  if(sources.some(source=>!config.programs.some(program=>program.sources.includes(source))))throw new Error("Every detected COBOL program source must be compiled.");
+  for(const item of config.tests)if(!names.has(item.program)||typeof item.name!=="string"||!item.name||typeof item.stdin!=="string"||Buffer.byteLength(item.stdin)>64000||typeof item.stdout!=="string"||Buffer.byteLength(item.stdout)>64000||item.stderr!==undefined&&(typeof item.stderr!=="string"||Buffer.byteLength(item.stderr)>64000)||!Number.isInteger(item.exitCode)||item.exitCode<0||item.exitCode>255||Object.keys(item).some(key=>!["program","name","stdin","stdout","stderr","exitCode"].includes(key)))throw new Error("Invalid COBOL executable assertion; skips and arbitrary commands are not permitted.");
+  return config;
+}
+const cobolTestProgram=`const path=require('node:path'),cp=require('node:child_process');const config=JSON.parse(process.argv[1]);let failed=0;for(const item of config.tests){const result=cp.spawnSync(path.join(process.cwd(),'.modernize-build',item.program),[],{input:item.stdin,encoding:'utf8',timeout:30000,maxBuffer:1000000});const ok=!result.error&&result.status===item.exitCode&&result.stdout===item.stdout&&result.stderr===(item.stderr||'');if(!ok){failed++;console.error(item.name,JSON.stringify({error:result.error?.message,status:result.status,stdout:result.stdout,stderr:result.stderr}));}}console.log('MODERNIZE_COBOL_TEST_COUNTS '+JSON.stringify({tests:config.tests.length,failed,skipped:0}));process.exitCode=failed?1:0;`;
+export const nativeInventoryProgram=String.raw`import os, sys, json, pathlib, subprocess, shlex, re
+root=pathlib.Path.cwd().resolve()
+build=root/'.modernize-build'
+paths=set()
+for dep in build.rglob('*.d'):
+    text=dep.read_text().replace('\\\n',' ')
+    words=shlex.split(text.split(':',1)[1] if ':' in text else '')
+    for word in words:
+        p=pathlib.Path(word)
+        paths.add(str(p if p.is_absolute() else root/p))
+for line in sys.argv[1].splitlines():
+    if re.fullmatch(r'/[^\s]+\.(?:a|o|so(?:\.\d+)*)',line.strip()):
+        paths.add(line.strip())
+binaries=[]
+for candidate in build.rglob('*'):
+    if not candidate.is_file() or candidate.is_symlink() or 'CMakeFiles' in candidate.parts: continue
+    with candidate.open('rb') as handle: head=handle.read(20)
+    if head[:4]!=b'\x7fELF' or len(head)<20: continue
+    if int.from_bytes(head[16:18],'little' if head[5]==1 else 'big') not in (2,3): continue
+    binaries.append(str(candidate))
+    result=subprocess.run(['ldd',str(candidate)],capture_output=True,text=True,timeout=30)
+    if result.returncode and 'not a dynamic executable' not in result.stderr+result.stdout: raise RuntimeError('ldd inventory failed: '+result.stderr+result.stdout)
+    if 'not found' in result.stdout: raise RuntimeError('Unresolved native shared library')
+    for match in re.finditer(r'(?:=>\s*)?(/[^\s]+)\s+\(',result.stdout): paths.add(match[1])
+if not binaries: raise RuntimeError('No fresh executable/shared-library build artifacts were inventoried')
+packages=set(sys.argv[2:])
+for value in paths:
+    p=pathlib.Path(value).resolve()
+    if p==root or root in p.parents: continue
+    if not str(p).startswith(('/usr/','/lib/','/lib64/','/bin/')): raise RuntimeError('Unauditable external native path: '+str(p))
+    found=False
+    for variant in dict.fromkeys([value,str(p),str(p).removeprefix('/usr')]):
+        result=subprocess.run(['dpkg-query','-S',variant],capture_output=True,text=True,timeout=30)
+        if not result.returncode:
+            packages.update(line.split(': ',1)[0] for line in result.stdout.splitlines() if ': ' in line)
+            found=True;break
+    if not found: raise RuntimeError('Native dependency is not owned by a signed Debian package: '+str(p))
+inventory={}
+for package in sorted(packages):
+    result=subprocess.run(['dpkg-query','-W','-f=$'+'{source:Package}\t$'+'{source:Version}\n',package],capture_output=True,text=True,check=True,timeout=30)
+    for line in result.stdout.splitlines():
+        name,version=line.split('\t')
+        if not name or not version: raise RuntimeError('Missing Debian source package version')
+        inventory[name+'@'+version]={'name':name,'version':version}
+print(json.dumps(list(inventory.values())))
+`;
+function nativeAudit(label,inventory,tools){
+  return async()=>{
+    const step=await runInvocations(label,[inventory],tools.execute);
+    if(step.exitCode!==0||step.timedOut)return step;
+    try{
+      const packages=JSON.parse(step.outputs[0]?.output||"");
+      if(!Array.isArray(packages)||!packages.length||packages.some(item=>typeof item.name!=="string"||typeof item.version!=="string"))throw new Error("Native dependency inventory is incomplete.");
+      return auditStep(step,await tools.osv("Debian:12",packages));
+    }catch(error){return {...step,exitCode:2,log:`${step.log}\nNative dependency audit is incomplete: ${error.message}`.slice(-32000)};}
+  };
+}
 export function ecosystemPlan(unit,variant,uid,files,tools){
   const root=path.join("/work",variant);const cwd=path.join(root,unit.project);const missing=[];
   const run=(label,invocations)=>runInvocations(label,invocations,tools.execute);
+  if(unit.runtime==="ruby"){
+    const version=bundlerVersion(files,unit.project);
+    const env={PATH:"/opt/modernize/ruby-gems/bin:/usr/local/bin:/usr/bin:/bin",GEM_PATH:"/opt/modernize/ruby-gems:/var/lib/gems/3.1.0:/usr/lib/ruby/gems/3.1.0",GEM_HOME:path.join(cwd,".gem-home"),BUNDLE_PATH:path.join(cwd,".modernize-gems"),BUNDLE_FROZEN:"true",BUNDLE_DEPLOYMENT:"true",BUNDLE_DISABLE_SHARED_GEMS:"true",BUNDLE_DISABLE_VERSION_CHECK:"true"};
+    const ruby=(args,extra={})=>({command:"ruby3.1",args,cwd,uid,env,timeoutMs:900000,fullOutputLimit:30_000_000,...extra});
+    const bundle=args=>ruby(["-S","bundle",`_${version}_`,...args]);
+    const scoped=files.filter(file=>inUnit(unit.project,file.path)&&!ignoredManifestPath.test(file.path));
+    const rspec=scoped.some(file=>/(^|\/)spec\/.+_spec\.rb$/.test(file.path));
+    const minitest=scoped.filter(file=>/(^|\/)test\/(?:.*\/)?(?:test_[^/]+|[^/]+_test)\.rb$/.test(file.path)).map(file=>path.posix.relative(unit.project,file.path));
+    if(!rspec&&!minitest.length)missing.push(`${variant} ${unit.project}: real RSpec/Minitest suites are required`);
+    const report=path.join(cwd,".modernize-rspec.json");
+    return {missing,steps:[
+      {index:0,run:()=>run(rubyCommands[0],[bundle(["install","--jobs","2","--retry","2"])])},
+      {index:1,run:()=>run(rubyCommands[1],[ruby(["-e","ARGV.each { |file| RubyVM::InstructionSequence.compile_file(file) }",...scoped.filter(file=>file.path.endsWith(".rb")).map(file=>path.posix.relative(unit.project,file.path))])])},
+      ...((rspec||minitest.length)?[{index:2,run:async()=>{
+        let total={tests:0,failed:0,skipped:0};const steps=[];
+        if(rspec){
+          const cleared=await run(rubyCommands[2],[ruby(["-e","File.unlink(ARGV[0]) if File.exist?(ARGV[0])",report])]);
+          if(cleared.exitCode!==0)return cleared;
+          const step=await run(rubyCommands[2],[bundle(["exec","rspec","--format","json","--out",report])]);
+          try{const counts=rubyTestCounts(await tools.readFile(report),"rspec");steps.push(enforceExecutedTests(step,counts));total=counts;}catch(error){steps.push({...step,exitCode:2,log:`${step.log}\n${error.message}`});}
+        }
+        if(minitest.length){
+          const step=await run(rubyCommands[2],[bundle(["exec","ruby3.1","-Itest","-e",minitestProgram,...minitest])]);
+          try{const counts=rubyTestCounts(step.outputs[0]?.output||"");steps.push(enforceExecutedTests(step,counts));for(const key of Object.keys(total))total[key]+=counts[key];}catch(error){steps.push({...step,exitCode:2,log:`${step.log}\n${error.message}`});}
+        }
+        return {...steps[0],command:rubyCommands[2],exitCode:steps.every(step=>step.exitCode===0&&!step.timedOut)?0:1,timedOut:steps.some(step=>step.timedOut),tests:total,log:steps.map(step=>step.log).join("\n").slice(-32000),durationMs:steps.reduce((sum,step)=>sum+step.durationMs,0)};
+      }}]:[]),
+      {index:3,audit:true,run:async()=>{
+        for(const name of ["Gemfile","Gemfile.lock"]){
+          const expected=decoded(files.find(file=>file.path===local(unit.project,name)));
+          if(await tools.readFile(path.join(cwd,name))!==expected)return {command:rubyCommands[3],exitCode:2,timedOut:false,durationMs:0,log:`Ruby ${name} changed during repository commands; source-bound dependency auditing is blocked.`};
+        }
+        const program=`gem 'bundler','= ${version}'; require 'bundler'; require 'json'; parser=Bundler::LockfileParser.new(File.read('Gemfile.lock')); list=parser.specs.filter_map { |spec| next if spec.source.is_a?(Bundler::Source::Path) && File.expand_path(spec.source.path.to_s)==Dir.pwd; unless spec.source.is_a?(Bundler::Source::Rubygems); raise 'Unauditable Git/path Ruby dependency'; end; {name:spec.name,version:spec.version.to_s} }; puts JSON.generate(list)`;
+        const step=await run(rubyCommands[3],[ruby(["-e",program])]);
+        if(step.exitCode!==0||step.timedOut)return step;
+        try{const packages=JSON.parse(step.outputs[0]?.output||"");if(!Array.isArray(packages))throw new Error("Missing Ruby lock inventory.");return auditStep(step,await tools.osv("RubyGems",packages));}catch(error){return {...step,exitCode:2,log:`${step.log}\nRuby dependency audit is incomplete: ${error.message}`.slice(-32000)};}
+      }},
+    ]};
+  }
+  if(unit.runtime==="cpp"){
+    nativePolicy(files,unit.project);let linkOutput="";
+    const invoke=(command,args,extra={})=>({command,args,cwd,uid,timeoutMs:900000,fullOutputLimit:30_000_000,...extra});
+    const report=path.join(cwd,".modernize-build/ctest.xml");
+    return {missing,steps:[
+      {index:0,run:()=>run(cppCommands[0],[invoke("node",["-e","require('node:fs').rmSync('.modernize-build',{recursive:true,force:true})"]),invoke("cmake",["-S",".","-B",".modernize-build","-DCMAKE_BUILD_TYPE=Release","-DCMAKE_EXE_LINKER_FLAGS=-Wl,-t","-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-t"])])},
+      {index:1,run:async()=>{const step=await run(cppCommands[1],[invoke("cmake",["--build",".modernize-build","--config","Release","--parallel","2"])]);linkOutput=step.outputs[0]?.output||"";return step;}},
+      {index:2,run:async()=>{const step=await run(cppCommands[2],[invoke("ctest",["--test-dir",".modernize-build","--output-on-failure","--no-tests=error","--output-junit",report])]);try{return enforceExecutedTests(step,junitCounts([{content:await tools.readFile(report)}]));}catch(error){return {...step,exitCode:2,log:`${step.log}\nCTest report is unavailable: ${error.message}`};}}},
+      {index:3,audit:true,run:()=>nativeAudit(cppCommands[3],invoke("python3",["-c",nativeInventoryProgram,linkOutput,"libc6","libgcc-s1","libstdc++6"]),tools)()},
+    ]};
+  }
+  if(unit.runtime==="cobol"){
+    const config=cobolContracts(files);let linkOutput="";
+    const copyDirectories=[...new Set(files.filter(file=>/\.(cpy|cob|cbl|cobol)$/i.test(file.path)).map(file=>path.posix.dirname(file.path)))];
+    const invoke=(command,args)=>({command,args,cwd,uid,timeoutMs:900000,fullOutputLimit:30_000_000});
+    return {missing,steps:[
+      {index:0,run:async()=>{
+        const step=await run(cobolCommands[0],[invoke("node",["-e","const fs=require('node:fs');fs.rmSync('.modernize-build',{recursive:true,force:true});fs.mkdirSync('.modernize-build')"]),...config.programs.map(program=>invoke("cobc",["-x",program.format==="free"?"-free":"-fixed","-Q","-Wl,-t",...copyDirectories.flatMap(directory=>["-I",directory]),"-o",path.join(".modernize-build",program.name),...program.sources]))]);
+        linkOutput=(step.outputs||[]).map(output=>output.output||"").join("\n");return step;
+      }},
+      {index:1,run:async()=>{const step=await run(cobolCommands[1],[invoke("node",["-e",cobolTestProgram,JSON.stringify(config)])]);try{const line=(step.outputs[0]?.output||"").split("\n").findLast(line=>line.startsWith("MODERNIZE_COBOL_TEST_COUNTS "));return enforceExecutedTests(step,line?JSON.parse(line.slice("MODERNIZE_COBOL_TEST_COUNTS ".length)):{tests:0,failed:0,skipped:0});}catch(error){return {...step,exitCode:2,log:`${step.log}\n${error.message}`};}}},
+      {index:2,audit:true,run:()=>nativeAudit(cobolCommands[2],invoke("python3",["-c",nativeInventoryProgram,linkOutput,"gnucobol3","libcob4","libc6"]),tools)()},
+    ]};
+  }
+  if(unit.runtime==="rust"){
+    const version=rustVersion(files,unit.project);
+    const env={PATH:"/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin",RUSTUP_HOME:"/opt/rustup",RUSTUP_TOOLCHAIN:version,CARGO_HOME:path.join(cwd,".cargo-home"),CARGO_TARGET_DIR:path.join(cwd,".modernize-target")};
+    const cargo=args=>({command:"/opt/cargo/bin/cargo",args,cwd,uid,env,timeoutMs:1200000,fullOutputLimit:30_000_000});
+    if(!files.some(file=>file.path===local(unit.project,"Cargo.lock")))missing.push(`${variant} ${unit.project}: original reviewed Cargo.lock is required`);
+    return {missing,steps:[
+      {index:0,run:()=>run(rustCommands[0],[cargo(["fetch","--locked"])])},
+      {index:1,run:()=>run(rustCommands[1],[cargo(["build","--locked","--workspace","--all-targets"])])},
+      {index:2,run:async()=>{const step=await run(rustCommands[2],[cargo(["test","--locked","--workspace","--","--format","pretty"])]);return enforceExecutedTests(step,rustTestCounts(step.outputs[0]?.output||""));}},
+      {index:3,audit:true,run:async()=>{const step=await run(rustCommands[3],[cargo(["metadata","--format-version","1","--locked"])]);if(step.exitCode!==0||step.timedOut)return step;try{return auditStep(step,await tools.osv("crates.io",cargoDependencies(step.outputs[0]?.output||"")));}catch(error){return {...step,exitCode:2,log:`${step.log}\nCargo audit is incomplete: ${error.message}`.slice(-32000)};}}},
+    ]};
+  }
   if(unit.runtime==="dotnet"){
     const env=ecosystemEnvironment("dotnet",root);
     const projects=files.filter(file=>dotnetProject.test(file.path)&&!ignoredManifestPath.test(file.path));
@@ -534,17 +967,24 @@ export async function prepareCandidateLocks(snapshot,execute=runCommand,read=rea
   const hasNpm=snapshot.candidate.some(file=>file.path==="package.json"||file.path.endsWith("/package.json"));
   for(const project of hasNpm?projectsFor(snapshot.candidate,{requireScripts:false,requireLock:false}):[]){
     const manifestPath=project==="."?"package.json":`${project}/package.json`;
-    const lockPath=project==="."?"package-lock.json":`${project}/package-lock.json`;
     const candidate=snapshot.candidate.find(file=>file.path===manifestPath);
     const original=snapshot.baseline.find(file=>file.path===manifestPath);
+    const manager=nodeManager(JSON.parse(decoded(candidate)),snapshot.candidate.map(file=>file.path),project);
+    if(original){
+      const before=nodeManager(JSON.parse(decoded(original)),snapshot.baseline.map(file=>file.path),project);
+      if(before.name!==manager.name||before.version!==manager.version||JSON.stringify(before.integrity)!==JSON.stringify(manager.integrity))throw new Error(`Changing the source package manager/version in ${project} is not permitted.`);
+    }
+    const lockPath=manager.lock;
     const lock=snapshot.candidate.find(file=>file.path===lockPath);
-    if(lock&&candidate.content===original?.content)continue;
+    const originalLock=snapshot.baseline.find(file=>file.path===lockPath);
+    if(lock&&candidate.content===original?.content&&lock.content===originalLock?.content)continue;
     const cwd=path.join("/work","candidate",project);
-    const step=await execute(["install","--package-lock-only","--ignore-scripts","--no-fund"],cwd,10002);
+    const args=manager.name==="npm"?["install","--package-lock-only","--ignore-scripts","--no-fund"]:manager.name==="pnpm"?["install","--lockfile-only","--ignore-scripts","--no-frozen-lockfile"]:manager.classic?["install","--ignore-scripts","--non-interactive"]:["install","--mode=update-lockfile"];
+    const step=manager.name==="npm"&&!manager.version?await execute(args,cwd,10002):await runTool(managerExecutable(manager),args,cwd,10002,900000,{YARN_IGNORE_PATH:"1",YARN_ENABLE_SCRIPTS:"false",YARN_ENABLE_IMMUTABLE_INSTALLS:"false",npm_config_manage_package_manager_versions:"false"});
     if(step.exitCode!==0||step.timedOut)throw new Error(`Dependency preparation failed for ${project}: ${step.log.slice(-1500)}`);
     const manifest=await read(path.join(cwd,"package.json"),"utf8");
     if(Buffer.from(manifest).toString("base64")!==candidate.content)throw new Error("Dependency preparation unexpectedly changed the candidate manifest.");
-    const content=await read(path.join(cwd,"package-lock.json"),"utf8");
+    const content=await read(path.join("/work","candidate",lockPath),"utf8");
     if(Buffer.byteLength(content)>2_000_000)throw new Error("Prepared dependency lockfile exceeds the 2 MB limit.");
     if(Buffer.from(content).toString("base64")!==lock?.content)artifacts.push({variant:"candidate",path:lockPath,content});
   }
@@ -552,10 +992,14 @@ export async function prepareCandidateLocks(snapshot,execute=runCommand,read=rea
     validatePath(lockPath);
     const project=path.posix.dirname(lockPath);
     const cwd=path.join("/work","baseline",project);
-    const step=await execute(["install","--package-lock-only","--ignore-scripts","--no-fund"],cwd,10001);
-    if(step.exitCode!==0||step.timedOut)throw new Error(`Baseline test tooling lock preparation failed for ${project}: ${step.log.slice(-1500)}`);
     const manifestPath=lockPath.replace(/package-lock\.json$/,"package.json");
     const expected=snapshot.baseline.find(file=>file.path===manifestPath);
+    if(!expected)throw new Error("Missing baseline manifest for tooling preparation.");
+    const manager=nodeManager(JSON.parse(decoded(expected)),snapshot.baseline.map(file=>file.path),project);
+    if(manager.name!=="npm"||manager.lock!==lockPath)throw new Error("Automatic baseline tooling preparation is qualified for npm locks only.");
+    const args=["install","--package-lock-only","--ignore-scripts","--no-fund"];
+    const step=manager.version?await runTool(managerExecutable(manager),args,cwd,10001,900000):await execute(args,cwd,10001);
+    if(step.exitCode!==0||step.timedOut)throw new Error(`Baseline test tooling lock preparation failed for ${project}: ${step.log.slice(-1500)}`);
     if(!expected||Buffer.from(await read(path.join(cwd,"package.json"),"utf8")).toString("base64")!==expected.content)throw new Error("Baseline preparation unexpectedly changed the baseline manifest.");
     const content=await read(path.join(cwd,"package-lock.json"),"utf8");
     if(Buffer.byteLength(content)>2_000_000)throw new Error("Baseline test tooling lock exceeds the 2 MB limit.");
@@ -563,9 +1007,42 @@ export async function prepareCandidateLocks(snapshot,execute=runCommand,read=rea
   }
   const candidateFile=filePath=>snapshot.candidate.find(file=>file.path===filePath);
   const changedArtifact=(filePath,content)=>{if(Buffer.byteLength(content)>2_000_000)throw new Error(`Prepared ${filePath} exceeds the 2 MB limit.`);if(Buffer.from(content).toString("base64")!==candidateFile(filePath)?.content)artifacts.push({variant:"candidate",path:filePath,content});};
-  for(const unit of ecosystemUnits(snapshot.candidate.map(file=>file.path))){
-    if(unit.runtime!=="go"&&unit.runtime!=="php")continue;
+  for(const unit of pythonUnits(snapshot.candidate.map(file=>file.path))){
+    const before=pythonUnits(snapshot.baseline.map(file=>file.path)).find(item=>item.project===unit.project);
+    if(before&&before.manager!==unit.manager)throw new Error("Changing the original Python lock owner is not permitted.");
+    if(unit.manager==="requirements")continue;
+    const original=snapshot.baseline.find(file=>file.path===unit.manifest);
+    if(original?.content===candidateFile(unit.manifest)?.content&&candidateFile(unit.lock)?.content===snapshot.baseline.find(file=>file.path===unit.lock)?.content)continue;
     const cwd=path.join("/work","candidate",unit.project);
+    const args=unit.manager==="poetry"?["lock","--no-interaction"]:["lock"];
+    const step=await runTool(`/opt/verification-tools/bin/${unit.manager}`,args,cwd,10002,900000,{PATH:"/opt/verification-tools/bin:/usr/local/bin:/usr/bin:/bin",PIPENV_VENV_IN_PROJECT:"1",PIPENV_IGNORE_VIRTUALENVS:"1",UV_PYTHON_DOWNLOADS:"never"});
+    if(step.exitCode!==0||step.timedOut)throw new Error(`${unit.manager} lock preparation failed: ${step.log.slice(-1500)}`);
+    if(Buffer.from(await read(path.join("/work","candidate",unit.manifest))).toString("base64")!==candidateFile(unit.manifest)?.content)throw new Error("Python lock preparation changed the source manifest.");
+    changedArtifact(unit.lock,await read(path.join("/work","candidate",unit.lock)));
+  }
+  for(const unit of ecosystemUnits(snapshot.candidate.map(file=>file.path))){
+    if(!["go","php","rust","ruby"].includes(unit.runtime))continue;
+    const cwd=path.join("/work","candidate",unit.project);
+    if(unit.runtime==="ruby"){
+      const version=bundlerVersion(snapshot.candidate,unit.project);
+      if(snapshot.baseline.some(file=>file.path===local(unit.project,"Gemfile"))&&bundlerVersion(snapshot.baseline,unit.project)!==version)throw new Error("The original exact Bundler version cannot be silently changed.");
+      const lockPath=local(unit.project,"Gemfile.lock");
+      const changed=snapshot.candidate.some(file=>inUnit(unit.project,file.path)&&(/(^|\/)Gemfile$|\.gemspec$/.test(file.path))&&snapshot.baseline.find(original=>original.path===file.path)?.content!==file.content);
+      if(!changed&&candidateFile(lockPath)?.content===snapshot.baseline.find(file=>file.path===lockPath)?.content)continue;
+      const step=await runTool("ruby3.1",["-S","bundle",`_${version}_`,"lock"],cwd,10002,900000,{PATH:"/opt/modernize/ruby-gems/bin:/usr/local/bin:/usr/bin:/bin",GEM_PATH:"/opt/modernize/ruby-gems:/usr/lib/ruby/gems/3.1.0",GEM_HOME:path.join(cwd,".gem-home"),BUNDLE_PATH:path.join(cwd,".modernize-gems"),BUNDLE_FROZEN:"false",BUNDLE_DEPLOYMENT:"false"});
+      if(step.exitCode!==0||step.timedOut)throw new Error(`Bundler lock preparation failed: ${step.log.slice(-1500)}`);
+      changedArtifact(lockPath,await read(path.join(cwd,"Gemfile.lock")));
+      continue;
+    }
+    if(unit.runtime==="rust"){
+      const lockPath=local(unit.project,"Cargo.lock");
+      const changed=snapshot.candidate.some(file=>inUnit(unit.project,file.path)&&/(^|\/)Cargo\.toml$/.test(file.path)&&snapshot.baseline.find(original=>original.path===file.path)?.content!==file.content);
+      if(!changed&&candidateFile(lockPath)&&candidateFile(lockPath).content===snapshot.baseline.find(file=>file.path===lockPath)?.content)continue;
+      const step=await runTool("/opt/cargo/bin/cargo",["generate-lockfile"],cwd,10002,900000,{PATH:"/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin",RUSTUP_HOME:"/opt/rustup",RUSTUP_TOOLCHAIN:rustVersion(snapshot.candidate,unit.project),CARGO_HOME:path.join(cwd,".cargo-home")});
+      if(step.exitCode!==0||step.timedOut)throw new Error(`Cargo lock preparation failed: ${step.log.slice(-1500)}`);
+      changedArtifact(lockPath,await read(path.join(cwd,"Cargo.lock")));
+      continue;
+    }
     if(unit.runtime==="go"){
       const modPath=local(unit.project,"go.mod");const sumPath=local(unit.project,"go.sum");
       const original=snapshot.baseline.find(file=>file.path===modPath);
@@ -612,9 +1089,98 @@ export async function materialize(root,files,uid){
 }
 
 export async function runCommand(args,cwd,uid,timeoutMs=240000){
-  return executeCommand("npm",args,cwd,uid,timeoutMs);
+  if(args[0]!=="test")return executeCommand("npm",args,cwd,uid,timeoutMs,args[0]==="audit"?{npm_config_registry:"https://registry.npmjs.org/"}:{});
+  const manifest=JSON.parse(await readFile(path.join(cwd,"package.json"),"utf8"));
+  const script=manifest.scripts?.test||"";
+  const jsonReporter=/\b(vitest|jest)\b/.test(script);
+  const reportPath=path.join(cwd,".modernize-verification-tests.json");
+  if(jsonReporter){
+    const cleared=await executeCommand("node",["-e","require('node:fs').rmSync(process.argv[1],{force:true})",reportPath],cwd,uid,30000);
+    if(cleared.exitCode!==0||cleared.timedOut)return {...cleared,command:"npm test -- --run",exitCode:1};
+  }
+  const testArgs=/\bvitest\b/.test(script)?["test","--","--run","--reporter=json",`--outputFile=${reportPath}`]:/\bjest\b/.test(script)?["test","--","--runInBand","--json",`--outputFile=${reportPath}`]:["test"];
+  const step=await executeCommand("npm",testArgs,cwd,uid,timeoutMs,{},20_000_000);
+  step.command="npm test -- --run";
+  try{
+    const output=jsonReporter?await readPreparedFile(reportPath,{limit:20_000_000}):step.output;
+    return enforceExecutedTests(step,npmTestCounts(output,jsonReporter?"json":"tap"));
+  }catch(error){return {...step,exitCode:step.exitCode||1,log:`${step.log}\nExecuted npm tests could not be established: ${error.message}`.slice(-32000)};}
 }
-
+export function nodeAuditFindings(output,manager){
+    const findings=[];
+    let advertised;
+    const add=advisory=>{
+      const severity=advisory.severity;
+      const id=advisory.github_advisory_id||advisory.url||String(advisory.id||"");
+      const name=advisory.module_name||advisory.name;
+      if(typeof severity!=="string"||!id||typeof name!=="string")throw new Error("Incomplete package-manager advisory.");
+      findings.push({package:name,version:"",id,severity});
+    };
+    if(manager.name==="yarn"&&manager.classic){
+      let summary=false;
+      for(const line of output.split("\n").filter(Boolean)){const event=JSON.parse(line);if(event.type==="auditAdvisory")add(event.data.advisory);if(event.type==="auditSummary"){summary=true;advertised=event.data?.vulnerabilities;}}
+      if(!summary)throw new Error("Yarn did not return a complete audit summary.");
+    }else{
+      if(manager.name==="yarn"&&!manager.classic&&!output.trim())return findings;
+      if(manager.name==="pnpm"){
+        const report=JSON.parse(output);
+        if(!report.metadata?.vulnerabilities||!report.advisories)throw new Error("pnpm did not return a complete audit report.");
+        advertised=report.metadata.vulnerabilities;
+        Object.values(report.advisories).forEach(add);
+      }else{
+        for(const line of output.split("\n").filter(item=>item.trim())){
+          const record=JSON.parse(line);
+          if(record?.type==="info"&&record.data==="No audit suggestions")continue;
+          if(record?.children&&typeof record.value==="string")add({module_name:record.value,id:record.children.ID,url:record.children.URL,severity:record.children.Severity});
+          else if(record&&typeof record==="object"&&!Array.isArray(record)&&Object.values(record).every(value=>Array.isArray(value))){
+            for(const [name,advisories] of Object.entries(record))for(const advisory of advisories)add({...advisory,module_name:name});
+          }else throw new Error("Yarn did not return a recognized complete advisory report.");
+        }
+      }
+    }
+    if(manager.name==="pnpm"||manager.classic){
+      if(!advertised||Object.values(advertised).some(count=>!Number.isSafeInteger(count)||count<0))throw new Error("Invalid audit summary counters.");
+      for(const [severity,count] of Object.entries(advertised))if(count>0&&!findings.some(item=>item.severity===severity))throw new Error("Audit summary findings are missing advisory details.");
+    }
+    return findings;
+  }
+  export async function runNodeCommand(manager,index,cwd,uid,manifest,tools=defaultTools){
+    const executable=managerExecutable(manager);
+    const env={YARN_IGNORE_PATH:"1",YARN_ENABLE_SCRIPTS:"false",COREPACK_ENABLE_PROJECT_SPEC:"0",npm_config_manage_package_manager_versions:"false",...(index===3?{npm_config_registry:"https://registry.npmjs.org/",YARN_REGISTRY:"https://registry.npmjs.org/",YARN_NPM_AUDIT_REGISTRY:"https://registry.npmjs.org/"}:{})};
+    if(index===3&&manager.name==="yarn"&&!manager.classic){
+      for(const key of ["npmAuditExcludePackages","npmAuditIgnoreAdvisories"]){
+        const checked=await tools.execute(executable,["config","get",key,"--json"],cwd,uid,30000,env,1_000_000);
+        try{
+          const value=JSON.parse(checked.output);
+          if(checked.exitCode!==0||checked.timedOut||!Array.isArray(value)||value.length)throw new Error("Repository audit exclusions cannot waive required dependency checks.");
+        }catch(error){return {...checked,command:nodeCommands.yarn[3],exitCode:2,log:`${checked.log}\nYarn audit configuration is incomplete: ${error.message}`.slice(-32000)};}
+      }
+    }
+    const install=manager.name==="npm"?["ci","--ignore-scripts","--no-fund"]:manager.name==="pnpm"?["install","--frozen-lockfile","--ignore-scripts"]:manager.classic?["install","--frozen-lockfile","--ignore-scripts","--non-interactive"]:["install","--immutable"];
+    const audit=manager.name==="npm"?["audit","--omit=dev","--audit-level=high"]:manager.name==="pnpm"?["audit","--prod","--json"]:manager.classic?["audit","--groups","dependencies","--json"]:["npm","audit","--environment","production","--all","--recursive","--json"];
+    const script=manifest.scripts?.test||"";
+    const jsonReporter=/\b(vitest|jest)\b/.test(script);
+    const reportPath=path.join(cwd,".modernize-verification-tests.json");
+    if(index===2&&jsonReporter){
+      const cleared=await tools.execute("node",["-e","require('node:fs').rmSync(process.argv[1],{force:true})",reportPath],cwd,uid,30000);
+      if(cleared.exitCode!==0||cleared.timedOut)return {...cleared,command:nodeCommands[manager.name][2],exitCode:1};
+    }
+    const testFlags=/\bvitest\b/.test(script)?["--run","--reporter=json",`--outputFile=${reportPath}`]:/\bjest\b/.test(script)?["--runInBand","--json",`--outputFile=${reportPath}`]:[];
+    const testArgs=manager.name==="npm"?["test",...(testFlags.length?["--",...testFlags]:[])]:["run","test",...(manager.name==="yarn"&&manager.classic&&testFlags.length?["--"]:[]),...testFlags];
+    let step={...await tools.execute(executable,[install,["run","build"],testArgs,audit][index],cwd,uid,900000,env,30_000_000),command:nodeCommands[manager.name][index]};
+    if(index===2){
+      try{return enforceExecutedTests(step,npmTestCounts(jsonReporter?await tools.readFile(reportPath,{limit:20_000_000}):step.output,jsonReporter?"json":"tap"));}
+      catch(error){return {...step,exitCode:step.exitCode||1,log:`${step.log}\nExecuted tests could not be established: ${error.message}`.slice(-32000)};}
+    }
+    if(index===3&&manager.name!=="npm"&&!step.timedOut){
+      try{
+        const findings=nodeAuditFindings(step.output,manager);
+        if(step.exitCode!==0&&!findings.length)return {...step,exitCode:2,log:`${step.log}\nThe audit exited unsuccessfully without verifiable findings.`.slice(-32000)};
+        return auditStep(step,findings);
+      }catch(error){return {...step,exitCode:2,log:`${step.log}\nDependency audit is incomplete: ${error.message}`.slice(-32000)};}
+    }
+    return step;
+  }
 export async function executeCommand(command,args,cwd,uid,timeoutMs=240000,extraEnv={},fullOutputLimit=0){
   const started=Date.now();let log="";let timedOut=false;let output="";let outputBytes=0;let outputTruncated=false;
   const variant=uid===10001?"baseline":"candidate";
@@ -641,23 +1207,54 @@ export function auditFindingsRecorded(log){
   }catch{return false;}
 }
 const defaultTools={execute:executeCommand,readReports:readOwnedReports,readFile:readPreparedFile,osv:osvFindings,exists:existsSync};
+export function reviewedRewrite(snapshot){
+  if(snapshot.scenario!=="rewrite")return false;
+  const original=snapshot.baseline?.find(file=>file.path==="tests/modernization-acceptance.json");
+  if(!original||snapshot.candidate?.find(file=>file.path===original.path)?.content!==original.content)return false;
+  try{
+    const source=JSON.parse(decoded(original));
+    if(source.version!==1||source.scenario!=="rewrite"||!Array.isArray(source.checks))return false;
+    const canonical=check=>JSON.stringify([check.id,check.kind,check.project||".",check.variants,check.command,check.args||[],check.report,check.timeoutSeconds||240]);
+    return source.checks.some(check=>check.kind==="contract"&&check.variants?.includes("baseline")&&check.variants?.includes("candidate")&&snapshot.scenarioChecks?.some(expected=>canonical(expected)===canonical(check)));
+  }catch{return false;}
+}
 
 export async function verifySnapshot(snapshot,publish,execute=runCommand,executePython=runPythonCommand,tools=defaultTools){
   const report={status:"failed",reason:"Verification started",steps:[]};
   const missing=[];
   const pythonFailures=[];
   const baselineAuditFailures=[];
+  const rewrite=reviewedRewrite(snapshot);
+  for(const source of snapshot.baseline||[]){
+    const test=isImmutableOriginalTest(source.path)||source.path.endsWith(".rs")&&/#\s*\[\s*(?:test|cfg\s*\(\s*test\s*\))/.test(decoded(source));
+    if(test&&snapshot.candidate?.find(file=>file.path===source.path)?.content!==source.content)pythonFailures.push(`Original test source cannot be removed or rewritten: ${source.path}`);
+    if(/(^|\/)package\.json$/.test(source.path)&&!snapshot.candidate?.some(file=>file.path===source.path)&&!rewrite)missing.push(`Original JavaScript project cannot be removed without an executed reviewed black-box contract: ${source.path}`);
+  }
+  for(const before of ecosystemUnits((snapshot.baseline||[]).map(file=>file.path)))if(!ecosystemUnits((snapshot.candidate||[]).map(file=>file.path)).some(after=>after.runtime===before.runtime&&after.project===before.project)&&!rewrite)missing.push(`Original ${before.runtime} project cannot be removed without an executed reviewed black-box contract: ${before.project}`);
+  try{
+    const beforeUnits=pythonUnits((snapshot.baseline||[]).map(file=>file.path));
+    const afterUnits=pythonUnits((snapshot.candidate||[]).map(file=>file.path));
+    for(const before of beforeUnits){
+      const after=afterUnits.find(after=>before.project===after.project);
+      if(after?after.manager!==before.manager:!rewrite)missing.push(`Original Python manager in ${before.project} cannot be removed or converted.`);
+    }
+  }catch(error){missing.push(error.message);}
   for(const [variant,uid] of [["baseline",10001],["candidate",10002]]){
     const files=snapshot[variant];
-    const pythonProjects=pythonProjectsFor(files);
-    for(const project of pythonProjects){
+    missing.push(...blockedRuntimeReasons(files.map(file=>file.path)).map(reason=>`${variant}: ${reason}`));
+    let pythonProjects=[];
+    try{pythonProjects=pythonUnits(files.map(file=>file.path));}catch(error){missing.push(`${variant}: ${error.message}`);}
+    for(const unit of pythonProjects){
+      const {project}=unit;
       const testPrefix=project==="."?"tests/":`${project}/tests/`;
       const hasTests=files.some(file=>file.path.startsWith(testPrefix)&&/(^|\/)test_[^/]+\.py$/.test(file.path));
       if(!hasTests)missing.push(`${variant} ${project}: no Python unittest tests found under ${testPrefix}`);
-      const hasTestDependencies=files.some(file=>file.path===(project==="."?"requirements-dev.txt":`${project}/requirements-dev.txt`));
+      const hasTestDependencies=unit.manager==="requirements"&&files.some(file=>file.path===(project==="."?"requirements-dev.txt":`${project}/requirements-dev.txt`));
       for(const index of [0,1,...(hasTestDependencies?[5]:[]),2,3,4]){
         if(index===3&&!hasTests)continue;
-        const step=await executePython(index,path.join("/work",variant,project),uid);
+        let step=unit.manager==="requirements"?await executePython(index,path.join("/work",variant,project),uid):await runManagedPythonCommand(unit,index,path.join("/work",variant,project),uid,tools);
+        if(index===3)step=enforceExecutedTests(step,step.tests||{tests:0,failed:0,skipped:0});
+        if(index===4)step=completePythonAudit(step);
         report.steps.push({...step,variant,project});
         await publish({...report,reason:`${variant}: ${project}: ${step.command}`},false);
         if(step.exitCode!==0||step.timedOut){
@@ -696,6 +1293,14 @@ export async function verifySnapshot(snapshot,publish,execute=runCommand,execute
     for(const project of projects){
       const manifestPath=project==="."?"package.json":`${project}/package.json`;
       const manifest=JSON.parse(Buffer.from(snapshot[variant].find(file=>file.path===manifestPath).content,"base64").toString("utf8"));
+      const manager=nodeManager(manifest,files.map(file=>file.path),project);
+      if(variant==="candidate"){
+        const source=snapshot.baseline.find(file=>file.path===manifestPath);
+        if(source){
+          const before=nodeManager(JSON.parse(decoded(source)),snapshot.baseline.map(file=>file.path),project);
+          if(before.name!==manager.name||before.version!==manager.version||JSON.stringify(before.integrity)!==JSON.stringify(manager.integrity)){missing.push(`Original package manager/version in ${project} cannot be changed.`);continue;}
+        }
+      }
       const commands=[["ci","--ignore-scripts","--no-fund"]];
       for(const script of ["build","test"]){
         if(typeof manifest.scripts?.[script]==="string"&&manifest.scripts[script].trim())commands.push(script==="build"?["run","build"]:["test","--","--run"]);
@@ -703,12 +1308,15 @@ export async function verifySnapshot(snapshot,publish,execute=runCommand,execute
       }
       commands.push(["audit","--omit=dev","--audit-level=high"]);
       for(const args of commands){
-        const step=await execute(args,path.join("/work",variant,project),uid);
+        const index=args[0]==="ci"?0:args[0]==="run"?1:args[0]==="test"?2:3;
+        let step=manager.name==="npm"&&!manager.version?await execute(args,path.join("/work",variant,project),uid):await runNodeCommand(manager,index,path.join("/work",variant,project),uid,manifest,tools);
+        if(args[0]==="test")step=enforceExecutedTests(step,step.tests||{tests:0,failed:0,skipped:0});
+        delete step.output;
         report.steps.push({...step,variant,project});
         await publish({...report,reason:`${variant}: ${project}: ${step.command}`},false);
         if(step.exitCode!==0||step.timedOut){
           const failure=`${variant} ${project}: ${step.command} ${step.timedOut?"timed out":`failed (exit ${step.exitCode})`}.`;
-          if(variant==="baseline"&&args[0]==="audit"&&!step.timedOut&&step.exitCode===1&&/# npm audit report/.test(step.log)&&/\bSeverity: (high|critical)\b/.test(step.log)){
+          if(variant==="baseline"&&args[0]==="audit"&&!step.timedOut&&step.exitCode===1&&(manager.name==="npm"?/# npm audit report/.test(step.log)&&/\bSeverity: (high|critical)\b/.test(step.log):auditFindingsRecorded(step.log))){
             baselineAuditFailures.push(failure);
             await publish({...report,reason:`Baseline audit failed; continuing candidate checks for comparison. ${failure}`},false);
             continue;
@@ -716,6 +1324,23 @@ export async function verifySnapshot(snapshot,publish,execute=runCommand,execute
           return {...report,reason:`${failure}${baselineAuditFailures.length?` Baseline findings: ${baselineAuditFailures.join(" ")}`:""}${missing.length?` Missing prerequisites: ${missing.join("; ")}.`:""}`.slice(0,2000)};
         }
       }
+    }
+  }
+  if(snapshot.scenarioChecks?.length){
+    const {executeScenarioChecks}=await import("./scenario-verification.mjs");
+    const steps=await executeScenarioChecks(snapshot,async(update)=>publish({...report,reason:update.reason,steps:[...report.steps,...update.steps]},false),{execute:tools.execute,readFile:tools.readFile,junitCounts,npmTestCounts,enforceExecutedTests});
+    report.steps.push(...steps);
+    for(const check of snapshot.scenarioChecks)for(const variant of check.variants){
+      const command=`modernization acceptance ${check.kind}: ${check.id}`;
+      const step=steps.find(step=>step.variant===variant&&step.project===check.project&&step.command===command);
+      if(!step||step.exitCode!==0||step.timedOut||!step.tests||step.tests.tests<1||step.tests.failed||step.tests.skipped)pythonFailures.push(`${variant} ${check.project}: ${command} did not complete successfully with nonempty, unskipped tests.`);
+    }
+    if(snapshot.candidateSecurity){
+      const {scanCandidate}=await import("./candidate-security.mjs");
+      const step=await scanCandidate(snapshot,{...tools,materialize});
+      report.steps.push(step);
+      await publish({...report,reason:step.command},false);
+      if(step.exitCode!==0||step.timedOut)pythonFailures.push("Candidate static or credential scanning failed; inspect the structured scan evidence.");
     }
   }
   if(pythonFailures.length)return {...report,status:"failed",reason:`${pythonFailures.join(" ")}${missing.length?` Missing prerequisites: ${missing.join("; ")}.`:""} Approval remains blocked.`.slice(0,2000)};
@@ -737,12 +1362,9 @@ async function main(){
     const response=await fetch(endpoint,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(60000)});
     if(!response.ok)throw new Error(`Snapshot download failed (${response.status}).`);
     let snapshot=await response.json();
-    if(pythonProjectsFor(snapshot.baseline).length||pythonProjectsFor(snapshot.candidate).length){
-      await publish({status:"failed",reason:"Preparing Python 3.11, Tkinter, a virtual display and dependency audit tooling in the isolated job.",steps:[]},false);
-      for(const [command,args] of [["apt-get",["update"]],["apt-get",["install","-y","--no-install-recommends","python3","python3-venv","python3-tk","xvfb","xauth","libasound2","libssl3"]],["python3",["-m","venv","/opt/verification-tools"]],["/opt/verification-tools/bin/python",["-m","pip","install","--disable-pip-version-check","pip-audit==2.9.0"]]]){
-        const setup=await executeCommand(command,args,"/tmp",0,240000);
-        if(setup.exitCode!==0||setup.timedOut)throw new Error(`Python runtime setup failed: ${command}. ${setup.log.slice(-1500)}`);
-      }
+    if(snapshot.candidateSecurity){
+      const {installCandidateScanner}=await import("./candidate-security.mjs");
+      await installCandidateScanner({execute:executeCommand,downloadVerified,writeFile});
     }
     const plan=toolchainPlan(snapshot);
     if(toolchainsRequired(plan)){

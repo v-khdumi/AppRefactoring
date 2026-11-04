@@ -1,13 +1,17 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { ManagedIdentityCredential } from "@azure/identity";
+import {managedIdentityCredential} from "./managed-identity";
 import type { PoolClient } from "pg";
 import { query, transaction } from "./db";
 import { env } from "./env";
-import { readVerificationSnapshot } from "./github-app";
+import { readSourceSnapshot } from "./source-provider";
 import { changesetDigest, safeSnapshotPath, reportPassed, type VerificationChange, type VerificationReport } from "./verification-evidence";
 import { verificationDescription } from "./verification-status";
 import { applyBaselineTestHarness } from "./baseline-test-harness";
-import { requiresWindowsVerifier } from "./verification-ecosystems";
+import { requiresWindowsVerifier,nodeLockPath } from "./verification-ecosystems";
+import {scenarioForOptions,scenarioAcceptance,applyScenarioHarness} from "./modernization-scenarios";
+import {currentChanges} from "./verification-record";
+import {dependencyLock} from "./repository-evidence";
+export {currentChanges,verifiedChangeset} from "./verification-record";
 
 export const windowsVerifierImage="mcr.microsoft.com/dotnet/framework/sdk@sha256:a78c7a33d5a6ec45c5c05dc78461f4c0797eef4ee44a71ec67f988fe91834b19";
 const windowsBootstrap="$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;New-Item -ItemType Directory C:\\modernize -Force|Out-Null;Invoke-WebRequest -UseBasicParsing -Uri ($env:VERIFICATION_ENDPOINT+'?script=windows') -Headers @{Authorization='Bearer '+$env:VERIFICATION_TOKEN} -OutFile C:\\modernize\\supervisor.ps1;& C:\\modernize\\supervisor.ps1";
@@ -16,7 +20,15 @@ export function windowsContainerGroupId(jobId:string){
   if(!group)throw new Error("The verification resource group is not configured.");
   return `${group}/providers/Microsoft.ContainerInstance/containerGroups/mz-winverify-${jobId.replace(/-/g,"").slice(0,24)}`;
 }
-async function managementToken(){return (await new ManagedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
+async function managementToken(){return (await managedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
+export async function verificationRuntimeHealth(){
+  if(!env.VERIFICATION_JOB_RESOURCE_ID||!env.VERIFICATION_PUBLIC_ORIGIN)return {status:"not-configured"};
+  const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${await managementToken()}`},signal:AbortSignal.timeout(15000)});
+  if(!response.ok)throw new Error(`Verification runtime readiness failed (${response.status}).`);
+  const job=await response.json() as {properties?:{configuration?:{triggerType?:string};template?:{containers?:Array<{name?:string}>}}};
+  if(job.properties?.configuration?.triggerType!=="Manual"||!job.properties.template?.containers?.some(container=>container.name==="runner"))throw new Error("The verification job is not configured for manual runner dispatch.");
+  return {status:"reachable"};
+}
 async function dispatchWindowsVerification(prepared:{id:string;token:string}){
   const access=await managementToken();
   const job=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${access}`},signal:AbortSignal.timeout(60000)});
@@ -43,24 +55,11 @@ export async function cleanupWindowsVerifiers(){
   }
 }
 
-export async function currentChanges(client:Pick<PoolClient,"query">,runId:string) {
-  const result=await client.query<{path:string;old_path:string|null;operation:string;after_content:string|null}>("SELECT path,old_path,operation,after_content FROM transformation_changes WHERE run_id=$1 ORDER BY path",[runId]);
-  return result.rows.map(row=>({path:row.path,oldPath:row.old_path,operation:row.operation,content:row.after_content||""}));
-}
-
-export async function verifiedChangeset(client:Pick<PoolClient,"query">,runId:string,tenantId:string,sourceSha:string) {
-  const changes=await currentChanges(client,runId);
-  if(!changes.length)return false;
-  const digest=changesetDigest(sourceSha,changes);
-  const evidence=await client.query<{status:string;report:VerificationReport}>("SELECT status,report FROM verification_jobs WHERE run_id=$1 AND tenant_id=$2 AND source_sha=$3 AND changeset_digest=$4 ORDER BY created_at DESC LIMIT 1",[runId,tenantId,sourceSha,digest]);
-  return Boolean(evidence.rows[0]?.status==="passed"&&evidence.rows[0]?.report&&reportPassed(evidence.rows[0].report));
-}
-
 export async function prepareVerification(runId:string,tenantId:string) {
   if(!env.VERIFICATION_JOB_RESOURCE_ID||!env.VERIFICATION_PUBLIC_ORIGIN)throw new Error("The isolated verification job is not configured.");
   const token=randomBytes(32).toString("hex");const id=randomUUID();
   const record=await transaction(async client=>{
-    const runs=await client.query<{source_commit_sha:string;repository_url:string;status:string}>("SELECT source_commit_sha,repository_url,status FROM modernization_runs WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[runId,tenantId]);
+    const runs=await client.query<{source_commit_sha:string;repository_url:string;status:string;options:Record<string,unknown>}>("SELECT source_commit_sha,repository_url,status,options FROM modernization_runs WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[runId,tenantId]);
     const run=runs.rows[0];
     if(!run)throw new Error("Run not found.");
     if(!["blocked","awaiting-approval","failed"].includes(run.status))throw new Error("Generation must stop before verification can start.");
@@ -94,22 +93,22 @@ export function applyVerificationChanges(baseline:Array<{path:string;content:str
 }
 
 export async function dispatchVerification(prepared:Awaited<ReturnType<typeof prepareVerification>>) {
-  const match=prepared.repository_url.match(/^https:\/\/github\.com\/([^/]+)\/([^/#]+?)(?:\.git)?\/?$/i);
-  if(!match)throw new Error("Invalid repository URL.");
   try{
-    const source=await readVerificationSnapshot(match[1],match[2],prepared.source_commit_sha);
+    const source=await readSourceSnapshot(prepared.repository_url,prepared.source_commit_sha);
     const candidate=applyVerificationChanges(source,prepared.changes);
-    const baseline=applyBaselineTestHarness(source,candidate);
-    const baselinePreparationPaths=baseline.filter(file=>/(^|\/)package\.json$/.test(file.path)&&source.find(original=>original.path===file.path)?.content!==file.content).map(file=>file.path.replace(/package\.json$/,"package-lock.json"));
+    const scenario=scenarioForOptions(prepared.options);
+    const acceptance=scenarioAcceptance(candidate,scenario);
+    const baseline=applyScenarioHarness(applyBaselineTestHarness(source,candidate),candidate);
+    const baselinePreparationPaths=[...new Set(baseline.filter(file=>/(^|\/)package\.json$/.test(file.path)&&source.find(original=>original.path===file.path)?.content!==file.content).map(file=>nodeLockPath(file.path,baseline)).filter((path):path is string=>Boolean(path)))];
     const windows=requiresWindowsVerifier(baseline)||requiresWindowsVerifier(candidate);
-    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,windows,sourceLockfiles:source.filter(file=>/(^|\/)(package-lock\.json|go\.mod|go\.sum|composer\.lock)$/.test(file.path))})]);
+    const claimed=await query("UPDATE verification_jobs SET snapshot=$2::jsonb,status='running',updated_at=now() WHERE id=$1 AND status='preparing' AND expires_at>now() RETURNING id",[prepared.id,JSON.stringify({baseline,candidate,baselinePreparationPaths,windows,candidateSecurity:!windows,scenario,scenarioChecks:acceptance?.checks||[],sourceLockfiles:source.filter(file=>dependencyLock.test(file.path)||/(^|\/)go\.mod$/.test(file.path))})]);
     if(!claimed.rowCount)return;
     if(windows){await dispatchWindowsVerification(prepared);return;}
-    const credential=new ManagedIdentityCredential();
+    const credential=managedIdentityCredential();
     const access=await credential.getToken("https://management.azure.com/.default");
     const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}/start?api-version=2024-03-01`,{
       method:"POST",headers:{Authorization:`Bearer ${access.token}`,"Content-Type":"application/json"},signal:AbortSignal.timeout(60000),
-      body:JSON.stringify({containers:[{name:"runner",image:"node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",resources:{cpu:2,memory:"4Gi"},command:["node","-e",`(async()=>{const r=await fetch(process.env.VERIFICATION_ENDPOINT+'?script=1',{headers:{Authorization:'Bearer '+process.env.VERIFICATION_TOKEN}});if(!r.ok)throw Error('Supervisor download failed');require('fs').writeFileSync('/tmp/verification-runner.mjs',await r.text(),{mode:0o600});await import('file:///tmp/verification-runner.mjs')})().catch(e=>{console.error(e.message);process.exit(1)})`],env:[{name:"VERIFICATION_ENDPOINT",value:`${env.VERIFICATION_PUBLIC_ORIGIN}/api/verification-jobs/${prepared.id}`},{name:"VERIFICATION_TOKEN",value:prepared.token}]}]}),
+      body:JSON.stringify({containers:[{name:"runner",image:"node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",resources:{cpu:2,memory:"4Gi"},command:["node","-e",`(async()=>{for(const [kind,file] of [['1','verification-runner.mjs'],['scenario','scenario-verification.mjs'],['security','candidate-security.mjs']]){const r=await fetch(process.env.VERIFICATION_ENDPOINT+'?script='+kind,{headers:{Authorization:'Bearer '+process.env.VERIFICATION_TOKEN}});if(!r.ok)throw Error('Supervisor download failed');require('fs').writeFileSync('/tmp/'+file,await r.text(),{mode:0o600});}await import('file:///tmp/verification-runner.mjs')})().catch(e=>{console.error(e.message);process.exit(1)})`],env:[{name:"VERIFICATION_ENDPOINT",value:`${env.VERIFICATION_PUBLIC_ORIGIN}/api/verification-jobs/${prepared.id}`},{name:"VERIFICATION_TOKEN",value:prepared.token}]}]}),
     });
     if(!response.ok)throw new Error(`Azure job dispatch failed (${response.status}).`);
   }catch(error){await query("UPDATE verification_jobs SET status='failed',error=$2,snapshot=NULL,updated_at=now() WHERE id=$1 AND status IN ('preparing','running') AND report IS NULL",[prepared.id,error instanceof Error?error.message:"Verification dispatch failed"]);throw error;}

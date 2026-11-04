@@ -5,7 +5,7 @@ import {verificationReadiness,readVerificationReadiness} from "../src/lib/verifi
 test("unsupported source and target stacks are rejected before generation",()=>{
   const source=verificationReadiness([{path:"native/Cargo.toml"},{path:"frontend/package.json",content:'{"scripts":{"build":"vite build","test":"vitest"}}'},{path:"frontend/package-lock.json"}],{scope:"frontend"});
   assert.equal(source.supported,false);
-  assert.ok(source.blockers.some(item=>item.code==="UnsupportedRuntime"));
+  assert.ok(source.blockers.some(item=>item.code==="LockfileRequired"&&item.path==="native/Cargo.lock"));
   assert.equal(verificationReadiness([{path:"requirements.txt",content:"fastapi==0.115.0"}],{scope:"backend",backendTarget:".NET 9 Minimal APIs"}).supported,false);
   assert.equal(verificationReadiness([{path:"Backend/App.csproj"}],{scope:"backend"}).blockers[0].code,"ManifestUnavailable");
 });

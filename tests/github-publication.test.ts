@@ -17,6 +17,8 @@ test("matching existing branch and PR are recovered without overwriting or dupli
   if(path.endsWith("/access_tokens"))return respond({token:"fixture"});
   if(path.endsWith("/git/ref/heads/main"))return respond({object:{sha:"source"}});
   if(path.endsWith("/git/commits/source"))return respond({tree:{sha:"base"}});
+  if(path.endsWith("/git/trees/base"))return respond({tree:[{path:"src/app.ts",mode:"100755"}]});
+  if(path.endsWith("/git/trees")&&options.method==="POST")assert.equal(JSON.parse(String(options.body)).tree[0].mode,"100755");
   if(path.endsWith("/git/trees"))return respond({sha:"approved-tree"});
   if(path.endsWith("/git/ref/heads/modernize%2Ftest"))return respond({object:{sha:"candidate"}});
   if(path.endsWith("/git/commits/candidate"))return respond({tree:{sha:"approved-tree"},parents:[{sha:"source"}]});
@@ -40,6 +42,7 @@ test("workflow-enabled token explicitly requests the granted permission and refu
   if(path.endsWith("/access_tokens")){assert.equal(JSON.parse(String(options.body)).permissions.workflows,"write");return respond({token:"fixture"});}
   if(path.endsWith("/git/ref/heads/main"))return respond({object:{sha:"source"}});
   if(path.endsWith("/git/commits/source"))return respond({tree:{sha:"base"}});
+  if(path.endsWith("/git/trees/base"))return respond({tree:[]});
   if(path.endsWith("/git/trees"))return respond({sha:"approved-tree"});
   if(path.endsWith("/git/ref/heads/modernize%2Ftest"))return respond({object:{sha:"candidate"}});
   if(path.endsWith("/git/commits/candidate"))return respond({tree:{sha:"different-tree"},parents:[{sha:"source"}]});

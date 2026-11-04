@@ -12,6 +12,7 @@ import { verificationState } from "@/lib/verification-service";
 import { verificationErrorCode } from "@/lib/verification-status";
 import { pipelineStages } from "@/lib/pipeline-stages";
 import type { TransformationStatus } from "@/types/modernization";
+import {approvalAccess,contributorQuery} from "@/lib/authorization-policy";
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -20,7 +21,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const user = await requireUser(request, ["Modernization.Reader", "Modernization.Admin"]);
     if (demoEnabled) return NextResponse.json({ ...createDemoTransformation(), id });
     const run = await query(
-      `SELECT id,repository_url,source_branch,target_branch,scope,options,status,progress,current_stage,source_commit_sha,pull_request_url,error_code,error_detail,created_at,updated_at,version,started_at
+      `SELECT id,repository_url,source_branch,target_branch,scope,options,status,progress,current_stage,source_commit_sha,pull_request_url,error_code,error_detail,created_at,updated_at,version,started_at,created_by
        FROM modernization_runs WHERE id=$1 AND tenant_id=$2`, [id, user.tenantId],
     );
     if (!run.rowCount) return NextResponse.json({ error: "Transformation run not found." }, { status: 404 });
@@ -30,6 +31,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     );
     const agents=await query("SELECT id,agent_type,status,progress,objective,summary,files_owned,error,(length(output_text)>0) AS has_output FROM agent_tasks WHERE run_id=$1 ORDER BY agent_type",[id]);
     const persisted = run.rows[0] as Record<string, unknown>;
+    const contributors=await query<{contributed:boolean}>(contributorQuery,[id,user.tenantId,user.id]);
     const publication=await query("SELECT attempts,last_error,next_attempt_at FROM outbox_events WHERE aggregate_id=$1::text AND tenant_id=$2 AND event_type='pull-request.requested' ORDER BY created_at DESC LIMIT 1",[id,user.tenantId]);
     const execution = await verificationState(id,user.tenantId,String(persisted.source_commit_sha||""));
     const verificationRequired = (requiresVerification(String(persisted.status)) || ["verification-required","verification-failed"].includes(String(persisted.current_stage))) && execution.status !== "passed";
@@ -50,6 +52,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       progress,
       currentStage,
       sourceCommitSha: persisted.source_commit_sha,
+      approvalAccess:approvalAccess(user.roles,user.id,String(persisted.created_by||""),Boolean(contributors.rows[0]?.contributed)),
+      permissions:{edit:user.roles.includes("Modernization.Admin"),manage:user.roles.includes("Modernization.Admin")},
       pullRequestUrl: persisted.pull_request_url,
       publication:publication.rows[0]?{attempts:publication.rows[0].attempts,lastError:publication.rows[0].last_error,nextAttemptAt:publication.rows[0].next_attempt_at}:undefined,
       aiModel:env.AZURE_AI_FOUNDRY_MODEL,

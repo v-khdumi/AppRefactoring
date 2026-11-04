@@ -2,6 +2,7 @@ import type { AnalysisResult, ModernizationOptions } from "@/types/modernization
 import { estimateModernization } from "@/lib/estimation";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { foundryModelParameters } from "@/lib/foundry-model";
+import {assertNoCredentials} from "./content-policy";
 
 interface FoundryInput {
   repositoryName: string;
@@ -18,6 +19,7 @@ export function isFoundryConfigured() {
 }
 
 export async function analyzeWithFoundry(input: FoundryInput, signal?: AbortSignal): Promise<AnalysisResult> {
+  assertNoCredentials([...input.samples,{path:"analysis options",content:JSON.stringify(input.options)}]);
   const endpoint = process.env.AZURE_AI_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
   const apiKey = process.env.AZURE_AI_FOUNDRY_API_KEY;
   const model = process.env.AZURE_AI_FOUNDRY_MODEL || "gpt-6-astra";

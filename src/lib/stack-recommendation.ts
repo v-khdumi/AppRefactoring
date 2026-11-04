@@ -3,6 +3,7 @@ import { env } from "@/lib/env";
 import { foundryModelParameters } from "@/lib/foundry-model";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { backendTargets, frontendTargets, isBackendTarget } from "@/lib/modernization-targets";
+import {assertNoCredentials} from "./content-policy";
 
 export const stackRecommendationSchema=z.object({
   scope:z.enum(["frontend","backend","fullstack"]),frontendTarget:z.enum(frontendTargets),backendTarget:z.enum(backendTargets),
@@ -15,6 +16,7 @@ export type StackRecommendation=z.infer<typeof stackRecommendationSchema>&{evide
 const rawSchema=z.object({scope:z.string().optional(),frontendTarget:z.string().optional(),backendTarget:z.string().optional(),confidence:z.coerce.number().optional(),rationale:z.array(z.unknown()).optional(),detectedStack:z.array(z.unknown()).optional(),alternatives:z.array(z.unknown()).optional(),risks:z.array(z.unknown()).optional()}).passthrough();
 
 export async function recommendStack(input:{repository:string;scope:StackRecommendation["scope"];paths:string[];samples:Array<{path:string;content:string}>;evidence?:import("./repository-evidence").RepositoryEvidence}):Promise<StackRecommendation>{
+ assertNoCredentials(input.samples);
  const detected=evidenceRecommendation(input);
  const fallback={...detected,scope:input.scope,rationale:[`User-selected scope: ${input.scope}. Other layers remain unchanged integration dependencies.`,...(input.scope!=="backend"?[`Frontend target: ${detected.frontendTarget}; validate existing API and UI contracts.`]:[]),...(input.scope!=="frontend"?[`Backend target: ${detected.backendTarget}; validate callers, persistence and dependency compatibility.`]:[])],alternatives:detected.alternatives.filter(item=>input.scope==="fullstack"||(input.scope==="frontend"?frontendTargets.includes(item.target as typeof frontendTargets[number]):backendTargets.includes(item.target as typeof backendTargets[number])))};
  if(!env.AZURE_AI_FOUNDRY_ENDPOINT||!env.AZURE_AI_FOUNDRY_API_KEY)return fallback;

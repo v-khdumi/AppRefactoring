@@ -9,6 +9,7 @@ $DotnetCommands = @('dotnet restore', 'dotnet build --no-restore -c Release', 'd
 $AuditPrefix = 'MODERNIZE_AUDIT_FINDINGS '
 $Dotnet10 = @{ Url = 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-win-x64.zip'; Sha512 = '24b670ad3d923bfcf47df6c3b034152398b42f6dbc388e10d783aee1cfb5e5817d399fc0ae2a12cfa822a55e61d34830ccb15c50ef6efee437ab874bb7c79430' }
 $DotnetInstall = @{ Url = 'https://raw.githubusercontent.com/dotnet/install-scripts/e5cf1dd2d1540ed05ac84f8eb8c5cdec2807621e/src/dotnet-install.ps1'; Sha256 = '3bb07bc8025211836c1e4f9d3f6a044e55b1fb6eec518a6c78851d04e210442b' }
+$WindowsNode = @{ Version = '22.23.4'; Url = 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip'; Sha256 = 'cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20' }
 
 $endpoint = $env:VERIFICATION_ENDPOINT
 $token = $env:VERIFICATION_TOKEN
@@ -43,6 +44,46 @@ function Get-VerifiedDownload($url, $algorithm, $expected, $destination) {
   }
   $actual = (Get-FileHash -LiteralPath $destination -Algorithm $algorithm).Hash.ToLowerInvariant()
   if ($actual -ne $expected.ToLowerInvariant()) { Remove-Item -LiteralPath $destination -Force; throw "Integrity verification failed for $url; the toolchain was not installed." }
+}
+
+function Install-WindowsNode {
+  Get-VerifiedDownload $WindowsNode.Url 'SHA256' $WindowsNode.Sha256 'C:\modernize\node.zip'
+  Expand-Archive -LiteralPath 'C:\modernize\node.zip' -DestinationPath 'C:\node-runtime' -Force
+  $root = "C:\node-runtime\node-v$($WindowsNode.Version)-win-x64"
+  New-Item -ItemType Directory -Path 'C:\modernize-tools' -Force | Out-Null
+  foreach ($entry in @(@('1','verification-runner.mjs'), @('windows-node','windows-node-verification.mjs'))) {
+    $target = Join-Path 'C:\modernize-tools' $entry[1]
+    if ($smokeSnapshot) {
+      if (-not (Test-Path -LiteralPath $target)) { throw "Windows canary helper is missing: $($entry[1])" }
+    } else {
+      Invoke-WebRequest -UseBasicParsing -Uri ($endpoint + '?script=' + $entry[0]) -Headers @{ Authorization = "Bearer $token" } -OutFile $target -TimeoutSec 120
+    }
+  }
+  & icacls.exe 'C:\node-runtime' /grant 'Users:(OI)(CI)RX' /T /C /Q | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not grant read-only access to the pinned Node runtime.' }
+  & icacls.exe 'C:\modernize-tools' /inheritance:r /grant:r 'Users:(OI)(CI)RX' 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /T /C /Q | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not restrict the verifier helper directory.' }
+  $npmCli = Join-Path $root 'node_modules\npm\bin\npm-cli.js'
+  $version = & (Join-Path $root 'node.exe') $npmCli --version
+  if ($LASTEXITCODE -ne 0) { throw 'The pinned Node/npm toolchain could not start.' }
+  return @{ node = (Join-Path $root 'node.exe'); npmCli = $npmCli; npmVersion = ([string]$version).Trim() }
+}
+
+function Invoke-WindowsNode($mode, $variant, $files, $credential, $node, $snapshot) {
+  $root = "C:\work\$variant"
+  $configPath = Join-Path $root '.modernize-node-config.json'
+  $resultPath = Join-Path $root '.modernize-node-result.json'
+  $configuration = @{ mode = $mode; variant = $variant; root = $root; files = $files; source = $snapshot['baseline']; baselinePreparationPaths = $snapshot['baselinePreparationPaths']; node = $node.node; npmCli = $node.npmCli; npmVersion = $node.npmVersion; result = $resultPath }
+  [IO.File]::WriteAllText($configPath, $serializer.Serialize($configuration), (New-Object Text.UTF8Encoding($false)))
+  Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+  $result = Invoke-AsUser $credential $root $node.node @('C:\modernize-tools\windows-node-verification.mjs', '--execute', $configPath) @{ MODERNIZE_VERIFICATION_VARIANT = $variant; PATH = "$([IO.Path]::GetDirectoryName($node.node));$env:SystemRoot\System32"; TEMP = $root; TMP = $root } 1800
+  if (-not (Test-Path -LiteralPath $resultPath)) { throw "Windows npm $mode failed: $($result.log)" }
+  $metadata = Get-Item -LiteralPath $resultPath
+  if (($metadata.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $metadata.Length -gt 20000000) { throw 'Windows npm report is not a bounded regular file.' }
+  $parsed = $serializer.DeserializeObject([IO.File]::ReadAllText($resultPath))
+  if ($result.timedOut -or ($result.exitCode -ne 0 -and -not $parsed['failed'])) { throw "Windows npm helper failed: $($result.log)" }
+  Remove-Item -LiteralPath $configPath, $resultPath -Force
+  return $parsed
 }
 
 function Test-SafePath($path) {
@@ -184,6 +225,7 @@ function Complete-TestStep($step, $counts) {
   if ($counts.tests -eq 0) { $note += ' No tests were executed; verification cannot pass.' }
   if ($counts.skipped) { $note += ' Skipped tests leave required coverage unverified.' }
   $step.log = ($step.log + "`n" + $note)
+  $step.tests = $counts
   if (-not $passed -and $step.exitCode -eq 0) { $step.exitCode = 1 }
   return $step
 }
@@ -337,6 +379,11 @@ try {
   $snapshot = Get-Snapshot
   New-Item -ItemType Directory -Path 'C:\modernize' -Force | Out-Null
   $all = @($snapshot['baseline']) + @($snapshot['candidate'])
+  $hasNode = @($all | Where-Object { $_['path'] -match '(^|/)package\.json$' }).Count -gt 0
+  if ($hasNode -and -not $smokeSnapshot) { throw 'The mixed Windows .NET+npm executor is not live-qualified. Azure infrastructure prevented the canary from starting; approval remains blocked rather than claiming unsupported execution.' }
+  $nonDotnet = @($all | Where-Object { $_['path'] -match '(^|/)(requirements\.txt|pyproject\.toml|Pipfile|Cargo\.toml|Gemfile|Rakefile|pom\.xml|(settings|build)\.gradle(\.kts)?|go\.mod|composer\.json|CMakeLists\.txt|meson\.build|conanfile\.(txt|py)|vcpkg\.json)$|\.(cob|cbl|cobol|cpy|c|cc|cpp|cxx|h|hpp|vcxproj|rb|rake|gemspec)$' })
+  if ($nonDotnet.Count) { throw 'Mixed Windows repositories remain blocked: this verifier cannot execute every detected non-.NET runtime, test suite and dependency audit. No runtime was waived.' }
+  if ($snapshot['scenarioChecks'] -and $snapshot['scenarioChecks'].Count) { throw 'Windows modernization acceptance checks are not yet qualified; required scenario checks cannot be waived.' }
   $needed = @{ sdk = $false; channels = @() }
   foreach ($file in $all | Where-Object { $_['path'] -match '\.(csproj|fsproj|vbproj)$' }) {
     $content = Get-Text $file
@@ -345,6 +392,7 @@ try {
   }
   Publish-Report @{ status = 'failed'; reason = 'Preparing the pinned Windows .NET Framework verifier, isolated accounts and checksum-verified .NET SDK.'; steps = @() } $false
   Install-Dotnet10 $needed
+  $node = if ($hasNode) { Install-WindowsNode } else { $null }
   $tools = Get-Tools
   $baselineUser = New-VerifierUser 'mzbaseline'
   $candidateUser = New-VerifierUser 'mzcandidate'
@@ -357,9 +405,30 @@ try {
   Remove-Item -LiteralPath 'C:\work\isolation-check' -Recurse -Force
   Expand-Variant 'C:\work\baseline' $snapshot['baseline'] 'mzbaseline'
   Expand-Variant 'C:\work\candidate' $snapshot['candidate'] 'mzcandidate'
+  if ($hasNode) {
+    $prepared = @()
+    foreach ($variant in 'baseline','candidate') {
+      $account = if ($variant -eq 'baseline') { $baselineUser } else { $candidateUser }
+      $preparation = Invoke-WindowsNode 'prepare' $variant $snapshot[$variant] $account $node $snapshot
+      $prepared += @($preparation['artifacts'])
+    }
+    if ($prepared.Count) {
+      if ($smokeSnapshot) { throw 'The Windows canary requires pre-resolved dependency locks.' }
+      Invoke-RestMethod -Method Post -Uri $endpoint -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body ($serializer.Serialize(@{ preparedFiles = $prepared })) -TimeoutSec 120 | Out-Null
+      $snapshot = Get-Snapshot
+    }
+  }
   $state = @{ missing = @(); failures = @(); baselineAudit = @() }
   Invoke-Variant 'baseline' @($snapshot['baseline']) $baselineUser $tools $report $state
   Invoke-Variant 'candidate' @($snapshot['candidate']) $candidateUser $tools $report $state
+  if ($hasNode) {
+    foreach ($variant in 'baseline','candidate') {
+      $account = if ($variant -eq 'baseline') { $baselineUser } else { $candidateUser }
+      $verification = Invoke-WindowsNode 'verify' $variant $snapshot[$variant] $account $node $snapshot
+      foreach ($step in @($verification['steps'])) { $report.steps += $step }
+      if ($verification['failed']) { $state.failures += "$variant npm: one or more executed checks failed." }
+    }
+  }
   if ($state.failures.Count) { $report.status = 'failed'; $report.reason = (($state.failures -join ' ') + $(if ($state.missing.Count) { " Missing prerequisites: $($state.missing -join '; ')." } else { '' }) + ' Approval remains blocked.') }
   elseif ($state.missing.Count) { $report.status = 'unsupported'; $report.reason = "Available checks completed, but required checks were not executed: $($state.missing -join '; '). Add the missing tests, then verify again. Approval remains blocked." }
   else { $report.status = 'passed'; $report.reason = $(if ($state.baselineAudit.Count) { 'Baseline and candidate install, build and tests passed. Candidate dependency audit passed; pre-existing baseline vulnerabilities are retained as diagnostics. Human review remains required.' } else { 'Baseline and candidate dependency installation, build/compilation, tests and dependency audit completed successfully for all detected projects. Human review remains required; this does not prove complete behavioral equivalence.' }) }

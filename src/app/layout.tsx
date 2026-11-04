@@ -7,6 +7,8 @@ import { AuthProvider } from "@/components/auth-provider";
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "ModernizeAI · Software modernization intelligence",
   description: "Controlled analysis and modernization of legacy applications with Microsoft Foundry.",
@@ -15,7 +17,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={manrope.variable}><AuthProvider>{children}</AuthProvider></body>
+      <body className={manrope.variable}><AuthProvider allowLocalDemo={process.env.DEMO_MODE==="true"}>{children}</AuthProvider></body>
     </html>
   );
 }

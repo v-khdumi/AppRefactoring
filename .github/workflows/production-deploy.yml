@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  security-events: write
 
 concurrency:
   group: modernize-ai-production
@@ -35,10 +36,24 @@ jobs:
         with:
           inlineScript: az bicep build --file infra/main.bicep --stdout > /dev/null
 
-  deploy:
+  codeql:
     needs: validate
+    uses: ./.github/workflows/codeql.yml
+
+  deploy:
+    needs: [validate, codeql]
     runs-on: ubuntu-latest
     environment: production
+    env:
+      AZURE_ENV_NAME: production
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      SERVICE_WEB_NAME: ${{ vars.SERVICE_WEB_NAME }}
+      SERVICE_WORKER_NAME: ${{ vars.SERVICE_WORKER_NAME }}
+      SERVICE_OUTBOX_NAME: ${{ vars.SERVICE_OUTBOX_NAME }}
+      MIGRATION_JOB_NAME: ${{ vars.MIGRATION_JOB_NAME }}
+      AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v2
@@ -46,32 +61,99 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: Azure/setup-azd@v2
-      - run: azd auth login --client-id "${{ secrets.AZURE_CLIENT_ID }}" --federated-credential-provider github --tenant-id "${{ secrets.AZURE_TENANT_ID }}"
-      - name: Deploy migration-capable worker
-        run: azd deploy worker --no-prompt
+      - name: Validate explicit provisioned release targets
+        shell: bash
+        run: |
+          : "${SERVICE_WEB_NAME:?Set the production SERVICE_WEB_NAME variable}"
+          : "${SERVICE_WORKER_NAME:?Set the production SERVICE_WORKER_NAME variable}"
+          : "${SERVICE_OUTBOX_NAME:?Set the production SERVICE_OUTBOX_NAME variable}"
+          : "${MIGRATION_JOB_NAME:?Set the production MIGRATION_JOB_NAME variable}"
+          : "${AZURE_CONTAINER_REGISTRY_ENDPOINT:?Set the production AZURE_CONTAINER_REGISTRY_ENDPOINT variable}"
+          : "${AZURE_RESOURCE_GROUP:?Set the production AZURE_RESOURCE_GROUP variable}"
+          for service in "$SERVICE_WEB_NAME" "$SERVICE_WORKER_NAME" "$SERVICE_OUTBOX_NAME"; do
+            az containerapp show --name "$service" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv >/dev/null
+          done
+          az containerapp job show --name "$MIGRATION_JOB_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv >/dev/null
+          registry="${AZURE_CONTAINER_REGISTRY_ENDPOINT%%.*}"
+          tier="$(az acr show --name "$registry" --resource-group "$AZURE_RESOURCE_GROUP" --query sku.name --output tsv)"
+          [[ "$tier" == "Premium" ]] || { echo "The approved release registry must be Premium."; exit 1; }
+      - name: Build release images once
+        shell: bash
+        run: |
+          : "${ENTRA_TENANT_ID:?Set the production ENTRA_TENANT_ID variable}"
+          : "${ENTRA_CLIENT_ID:?Set the production ENTRA_CLIENT_ID variable}"
+          docker build -f Dockerfile \
+            --build-arg NEXT_PUBLIC_AZURE_TENANT_ID="$ENTRA_TENANT_ID" \
+            --build-arg NEXT_PUBLIC_AZURE_CLIENT_ID="$ENTRA_CLIENT_ID" \
+            --build-arg NEXT_PUBLIC_AZURE_API_SCOPE="api://$ENTRA_CLIENT_ID/Modernization.Access" \
+            -t "modernize-release/web:$GITHUB_SHA" .
+          docker build -f Dockerfile.worker -t "modernize-release/worker:$GITHUB_SHA" .
+          docker build -f Dockerfile.outbox -t "modernize-release/outbox:$GITHUB_SHA" .
         env:
-          AZURE_ENV_NAME: production
-          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-      - name: Run database migration job
-        run: az containerapp job start --name "$(azd env get-value MIGRATION_JOB_NAME)" --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"
+          ENTRA_TENANT_ID: ${{ vars.ENTRA_TENANT_ID }}
+          ENTRA_CLIENT_ID: ${{ vars.ENTRA_CLIENT_ID }}
+      - name: Scan web release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.70.0
+          image-ref: modernize-release/web:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+      - name: Scan worker release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.70.0
+          image-ref: modernize-release/worker:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+      - name: Scan outbox release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.70.0
+          image-ref: modernize-release/outbox:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+      - name: Push only scanned images and record immutable digests
+        shell: bash
+        run: |
+          registry="$AZURE_CONTAINER_REGISTRY_ENDPOINT"
+          az acr login --name "${registry%%.*}"
+          for service in web worker outbox; do
+            image="$registry/modernize-ai/$service:$GITHUB_SHA"
+            docker tag "modernize-release/$service:$GITHUB_SHA" "$image"
+            docker push "$image"
+            digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$image")"
+            [[ "$digest" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1
+            echo "${service^^}_IMAGE=$digest" >> "$GITHUB_ENV"
+          done
+      - name: Run current release migrations and wait for success
+        shell: bash
+        run: |
+          migration="$MIGRATION_JOB_NAME"
+          az containerapp job update --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WORKER_IMAGE" --output none
+          execution="$(az containerapp job start --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --query name --output tsv)"
+          for attempt in {1..100}; do
+            status="$(az containerapp job execution show --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --job-execution-name "$execution" --query properties.status --output tsv)"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped) echo "Migration execution failed: $status"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "Migration execution did not succeed before the release deadline."
+          exit 1
+      - name: Deploy worker by scanned digest
+        run: az containerapp update --name "$SERVICE_WORKER_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WORKER_IMAGE" --output none
       - name: Deploy outbox
-        run: azd deploy outbox --no-prompt
-        env:
-          AZURE_ENV_NAME: production
-          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: az containerapp update --name "$SERVICE_OUTBOX_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$OUTBOX_IMAGE" --output none
       - name: Deploy web
-        run: azd deploy web --no-prompt
-        env:
-          AZURE_ENV_NAME: production
-          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: az containerapp update --name "$SERVICE_WEB_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WEB_IMAGE" --output none
       - name: Verify operational health
         shell: bash
         run: |
-          endpoint="$(azd env get-value SERVICE_WEB_URI)"
+          hostname="$(az containerapp show --name "$SERVICE_WEB_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.ingress.fqdn --output tsv)"
+          [[ -n "$hostname" ]] || exit 1
+          endpoint="https://$hostname"
           response="$(curl --fail --retry 8 --retry-delay 10 --max-time 30 -H "x-health-check-token: $HEALTH_CHECK_TOKEN" "$endpoint/api/health?deep=true")"
           node -e 'const health=JSON.parse(process.argv[1]); if(health.status!=="healthy"||health.mode!=="live"||health.operations?.queue?.deadLetterMessages!==0) process.exit(1)' "$response"
         env:

@@ -3,6 +3,7 @@ import { validationExecution } from "./validation-execution";
 
 export function approvalBlockReason(run: TransformationRun) {
   if (run.mode === "demo") return "";
+  if(run.approvalAccess&&!run.approvalAccess.canApprove)return run.approvalAccess.reason;
   if (["approved", "pull-request-created", "publication-failed"].includes(run.status)) return "Approval already recorded.";
   const execution = run.validationExecution;
   if (execution && execution.status !== "passed") {

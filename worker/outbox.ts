@@ -1,7 +1,7 @@
 import { database, transaction } from "../src/lib/db";
-import { createModernizationPullRequest, publishChanges } from "../src/lib/github-app";
+import { createSourcePullRequest, publishSourceChanges } from "../src/lib/source-provider";
 import { logEvent } from "../src/lib/structured-log";
-import { currentChanges, verifiedChangeset } from "../src/lib/verification-service";
+import { currentChanges, verifiedChangeset } from "../src/lib/verification-record";
 import { changesetDigest } from "../src/lib/verification-evidence";
 import { permanentPublicationError } from "../src/lib/publication-policy";
 
@@ -40,21 +40,18 @@ async function processLocked() {
     if(!await verifiedChangeset(database(),event.aggregate_id,event.tenant_id,run.source_commit_sha))throw new Error("Executed verification is missing or stale. Publication was not attempted.");
     if(event.payload.changesetDigest!==changesetDigest(run.source_commit_sha,await currentChanges(database(),event.aggregate_id)))throw new Error("The approved changeset has changed. A new human approval is required.");
     if (event.payload.commitSha !== run.source_commit_sha) throw new Error("Approval SHA does not match the reviewed source commit.");
-    const match = run.repository_url.match(/^https:\/\/github\.com\/([^/]+)\/([^/#]+?)(?:\.git)?\/?$/i);
-    if (!match) throw new Error("Invalid repository URL.");
-    const [, owner, repo] = match;
     const changeResult = await database().query<{ path: string; operation: string; after_content: string | null }>(
       "SELECT path,operation,after_content FROM transformation_changes WHERE run_id=$1 ORDER BY path", [event.aggregate_id],
     );
     await database().query("UPDATE modernization_runs SET current_stage='publishing-branch',progress=92,error_code=NULL,error_detail=NULL,updated_at=now(),version=version+1 WHERE id=$1 AND tenant_id=$2 AND status='approved'",[event.aggregate_id,event.tenant_id]);
-    const commitSha = await publishChanges({
-      owner, repo, sourceBranch: run.source_branch, targetBranch: run.target_branch, expectedCommitSha: run.source_commit_sha,
+    const commitSha = await publishSourceChanges(run.repository_url,{
+      sourceBranch: run.source_branch, targetBranch: run.target_branch, expectedCommitSha: run.source_commit_sha,
       message: `Modernize application (${event.aggregate_id})`,
       changes: changeResult.rows.map((change) => ({ path: change.path, content: change.operation === "deleted" ? null : change.after_content || "" })),
     });
     await database().query("UPDATE modernization_runs SET current_stage='publishing-pull-request',progress=97,generated_commit_sha=$3,updated_at=now(),version=version+1 WHERE id=$1 AND tenant_id=$2 AND status='approved'",[event.aggregate_id,event.tenant_id,commitSha]);
-    const pullRequest = await createModernizationPullRequest({
-      owner, repo, sourceBranch: run.source_branch, targetBranch: run.target_branch,
+    const pullRequest = await createSourcePullRequest(run.repository_url,{
+      sourceBranch: run.source_branch, targetBranch: run.target_branch,
       title: "Modernize application with ModernizeAI",
       body: `## ModernizeAI transformation\n\nRun: ${event.aggregate_id}\n\nThis draft pull request was generated only after human approval bound to source commit \`${run.source_commit_sha}\`. Review all quality-gate evidence before marking it ready.`,
     });
