@@ -45,6 +45,7 @@ export function TransformationWorkspace({ onBack, onDeleted, runId,initialView="
   const [query, setQuery] = useState("");
   const [approving, setApproving] = useState(false);
   const [editingCode,setEditingCode]=useState(false);
+  const [pilotApprovalAcknowledged,setPilotApprovalAcknowledged]=useState(false);
   const approvalInFlight = useRef(false);
   const [approvalError, setApprovalError] = useState("");
   const [rejectedVersion, setRejectedVersion] = useState<number | null>(null);
@@ -108,7 +109,9 @@ export function TransformationWorkspace({ onBack, onDeleted, runId,initialView="
   const approved = ["approved", "pull-request-created", "publication-failed"].includes(run.status);
   const canEdit=run.mode==="demo"||run.permissions?.edit===true;
   const canManage=run.mode==="demo"||run.permissions?.manage===true;
-  const approvalReason = (editingCode?"Finish or discard the code edit before approval.":"") || approvalBlockReason(run) || (rejectedVersion === (run.version ?? 0) ? "The server rejected approval for this revision. Waiting for updated validation state." : "");
+  const pilotSelfApproval=run.approvalAccess?.selfApprovalException===true;
+  useEffect(()=>setPilotApprovalAcknowledged(false),[runId,run.validationExecution?.changesetDigest,pilotSelfApproval]);
+  const approvalReason = (editingCode?"Finish or discard the code edit before approval.":"") || approvalBlockReason(run) || (pilotSelfApproval&&!pilotApprovalAcknowledged?"Acknowledge the pilot administrator self-approval exception before approval.":"") || (rejectedVersion === (run.version ?? 0) ? "The server rejected approval for this revision. Waiting for updated validation state." : "");
 
   async function approve() {
     if (approvalInFlight.current || approvalReason || approved) return;
@@ -119,7 +122,7 @@ export function TransformationWorkspace({ onBack, onDeleted, runId,initialView="
       await withRequestDeadline(async signal => {
         const response = await authorizedFetch(`/api/transformations/${run.id}/approve`, {
           method: "POST", signal, headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ commitSha: run.sourceCommitSha, changesetDigest:run.validationExecution?.changesetDigest, decision: "approved", comment: "Reviewed exact file diff and validation evidence." }),
+          body: JSON.stringify({ commitSha: run.sourceCommitSha, changesetDigest:run.validationExecution?.changesetDigest, decision: "approved", comment: "Reviewed exact file diff and validation evidence.",...(pilotSelfApproval?{acknowledgePilotSelfApproval:pilotApprovalAcknowledged}:{}) }),
         });
         if (response.status === 409) setRejectedVersion(run.version ?? 0);
         if (!response.ok) { const payload = await response.json().catch(()=>({})); throw new Error(payload.error || `Approval failed (HTTP ${response.status}).`); }
@@ -156,6 +159,7 @@ export function TransformationWorkspace({ onBack, onDeleted, runId,initialView="
     {run.mode === "demo" && <div className="demo-disclosure"><AlertTriangle size={15}/><strong>Demonstration run:</strong> progress and diffs are representative. No GitHub files are being changed until a live GitHub App connection and approval are configured.</div>}
     {run.mode === "live"&&run.errorDetail&&<div className="run-api-error"><XCircle size={14}/><div><strong>{run.errorCode||"Transformation failed"}</strong><span>{run.errorDetail}</span></div></div>}
     {apiError && <div className="run-api-error"><XCircle size={14}/>{apiError}</div>}
+    {pilotSelfApproval&&!approved&&run.status==="awaiting-approval"&&<section className="panel" aria-label="Pilot administrator self-approval"><p className="inline-note">Pilot-only administrator exception: you initiated or contributed to this changeset. Verification, source SHA and changeset digest checks remain mandatory. Your real identity and this exception will be recorded in the audit trail.</p><label className="preserve-check"><input type="checkbox" checked={pilotApprovalAcknowledged} disabled={approving} onChange={event=>setPilotApprovalAcknowledged(event.target.checked)}/><span><strong>I acknowledge pilot administrator self-approval for this verified changeset.</strong><small>This exception is not available in production.</small></span></label></section>}
     {run.mode === "live" && ["preparing","running"].includes(run.validationExecution?.status || "") && <div className="inline-note" role="status"><LoaderCircle className="spin" size={15}/><span>{run.validationExecution?.reason}</span><button className="secondary-button" onClick={()=>setTab("validation")}>View verification</button></div>}
     {!demo && run.status === "retrying" && <div className="inline-note"><RefreshCw size={14}/>Retry scheduled. Progress will restart for the new attempt.</div>}
     {!demo&&canManage&&<div className="run-project-actions"><DeleteProjectButton id={run.id} repository={run.repository} branch={run.targetBranch} status={run.status} onDeleted={onDeleted || onBack}/></div>}

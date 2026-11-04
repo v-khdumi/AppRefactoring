@@ -10,8 +10,11 @@ are rejected before any source request.
 Configure `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET`
 server-side through approved secret storage. Install the App only on approved
 repositories. Analysis and generation use short-lived read-only installation
-tokens. Publication requests write permissions only after independent,
-source/digest-bound human approval. Workflow-file changes require the App's
+tokens. Publication requests write permissions only after explicit,
+source/digest-bound human approval. Production requires an independent reviewer.
+An explicitly enabled pilot administrator exception requires acknowledgement
+and is separately audited; it never waives execution evidence or source binding.
+Workflow-file changes require the App's
 additional workflow permission. Personal access tokens and browser-supplied
 source credentials are not used for unattended writes.
 

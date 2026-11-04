@@ -36,6 +36,16 @@ documented in the runbook even though its scoped permissions are provisioned.
 
 Production policy must deny direct main-branch pushes and require all quality checks plus an independent approver.
 
+The production template and production release workflow explicitly set
+`DEPLOYMENT_TIER=production` and `PILOT_ALLOW_ADMIN_SELF_APPROVAL=false`.
+The server refuses production self-approval even if a client supplies an
+acknowledgement. A separately operated pilot may explicitly set
+`DEPLOYMENT_TIER=pilot` together with `PILOT_ALLOW_ADMIN_SELF_APPROVAL=true` on
+the web application only. This permits administrators, not ordinary approvers,
+to acknowledge and approve their own currently verified changeset. Audit records
+retain the real actor, source/digest, deployment tier and `pilot-admin-self` mode.
+It does not bypass tests, scans, source consistency or the draft-PR-only policy.
+
 The production workflow requires separate `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID`
 environment variables for browser authentication; deployment OIDC credentials are
 not the browser application's identity. Set `SERVICE_WEB_NAME`,

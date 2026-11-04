@@ -8,7 +8,7 @@ import {enforceRateLimit} from "@/lib/rate-limit";
 import {recordApproval,ApprovalFailure} from "@/lib/approval-service";
 import {ContentPolicyError} from "@/lib/content-policy";
 
-const schema=z.object({commitSha:z.string().regex(/^[a-f0-9]{40}$/i),changesetDigest:z.string().regex(/^[a-f0-9]{64}$/i).optional(),decision:z.enum(["approved","rejected"]),comment:z.string().max(2000).optional()});
+const schema=z.object({commitSha:z.string().regex(/^[a-f0-9]{40}$/i),changesetDigest:z.string().regex(/^[a-f0-9]{64}$/i).optional(),decision:z.enum(["approved","rejected"]),comment:z.string().max(2000).optional(),acknowledgePilotSelfApproval:z.boolean().optional()});
 
 export async function POST(request:Request,context:{params:Promise<{id:string}>}){
   try{

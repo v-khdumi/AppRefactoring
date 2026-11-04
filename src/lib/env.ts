@@ -5,6 +5,8 @@ const optionalUrl = z.string().url().optional().or(z.literal(""));
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DEMO_MODE: z.enum(["true", "false"]).default("false"),
+  DEPLOYMENT_TIER:z.enum(["production","pilot"]).default("production"),
+  PILOT_ALLOW_ADMIN_SELF_APPROVAL:z.enum(["true","false"]).default("false"),
   DATABASE_URL: z.string().min(1).optional(),
   AZURE_SERVICE_BUS_CONNECTION_STRING: z.string().min(1).optional(),
   AZURE_SERVICE_BUS_NAMESPACE: z.string().min(1).optional(),
@@ -36,6 +38,7 @@ export function serviceBusNamespaceFromConnectionString(connectionString?:string
 export function serviceBusNamespace(configuration = env){return configuration.AZURE_SERVICE_BUS_NAMESPACE;}
 
 export function assertProductionConfiguration(configuration = env) {
+  if(configuration.PILOT_ALLOW_ADMIN_SELF_APPROVAL==="true"&&configuration.DEPLOYMENT_TIER!=="pilot")throw new Error("PILOT_ALLOW_ADMIN_SELF_APPROVAL is forbidden outside an explicit pilot deployment.");
   if (configuration.NODE_ENV !== "production" || configuration.DEMO_MODE === "true") return;
   const required = [
     "DATABASE_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID",

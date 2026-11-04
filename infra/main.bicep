@@ -549,6 +549,8 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
           env: [
             { name: 'NODE_ENV', value: 'production' }
             { name: 'DEMO_MODE', value: 'false' }
+            { name: 'DEPLOYMENT_TIER', value: 'production' }
+            { name: 'PILOT_ALLOW_ADMIN_SELF_APPROVAL', value: 'false' }
             { name: 'SERVICE_NAME', value: 'modernize-web' }
             { name: 'AZURE_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
             { name: 'DATABASE_URL', secretRef: 'database-url' }

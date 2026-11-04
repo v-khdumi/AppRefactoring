@@ -12,7 +12,7 @@ import { verificationState } from "@/lib/verification-service";
 import { verificationErrorCode } from "@/lib/verification-status";
 import { pipelineStages } from "@/lib/pipeline-stages";
 import type { TransformationStatus } from "@/types/modernization";
-import {approvalAccess,contributorQuery} from "@/lib/authorization-policy";
+import {approvalAccess,approvalPolicy,contributorQuery} from "@/lib/authorization-policy";
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -52,7 +52,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       progress,
       currentStage,
       sourceCommitSha: persisted.source_commit_sha,
-      approvalAccess:approvalAccess(user.roles,user.id,String(persisted.created_by||""),Boolean(contributors.rows[0]?.contributed)),
+      approvalAccess:approvalAccess(user.roles,user.id,String(persisted.created_by||""),Boolean(contributors.rows[0]?.contributed),approvalPolicy(env)),
       permissions:{edit:user.roles.includes("Modernization.Admin"),manage:user.roles.includes("Modernization.Admin")},
       pullRequestUrl: persisted.pull_request_url,
       publication:publication.rows[0]?{attempts:publication.rows[0].attempts,lastError:publication.rows[0].last_error,nextAttemptAt:publication.rows[0].next_attempt_at}:undefined,

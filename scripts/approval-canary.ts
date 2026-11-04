@@ -7,6 +7,7 @@ import pg from "pg";
 import {recordApproval,ApprovalFailure} from "../src/lib/approval-service";
 import {changesetDigest,npmVerificationCommands} from "../src/lib/verification-evidence";
 import type {UserContext} from "../src/lib/auth";
+import {env} from "../src/lib/env";
 
 if(process.platform!=="linux"||process.getuid?.()!==0)throw new Error("Run only in a dedicated ephemeral Linux canary job.");
 if(process.env.DATABASE_URL||process.env.GITHUB_APP_PRIVATE_KEY||process.env.VERIFICATION_TOKEN)throw new Error("This canary must not receive production credentials or capabilities.");
@@ -50,11 +51,11 @@ async function main(){
       await pool.query("INSERT INTO verification_jobs(run_id,tenant_id,source_sha,changeset_digest,token_hash,expires_at,status,report) VALUES($1,'canary-tenant',$2,$3,$4,now()+interval '75 minutes','passed',$5::jsonb)",[id,sourceSha,digest,"0".repeat(64),JSON.stringify({status:"passed",reason:"Seeded report for transaction semantics only.",steps})]);
       return {id,digest};
     }
-    async function approve(run:{id:string;digest:string},user:UserContext,digest=run.digest){
+    async function approve(run:{id:string;digest:string},user:UserContext,digest=run.digest,acknowledgePilotSelfApproval=false){
       const client=await pool.connect();
       try{
         await client.query("BEGIN");
-        await recordApproval(client,{id:run.id,actor:user,commitSha:sourceSha,changesetDigest:digest,decision:"approved"});
+        await recordApproval(client,{id:run.id,actor:user,commitSha:sourceSha,changesetDigest:digest,decision:"approved",acknowledgePilotSelfApproval});
         await client.query("COMMIT");
       }catch(error){await client.query("ROLLBACK");throw error;}
       finally{client.release();}
@@ -86,8 +87,39 @@ async function main(){
     const counts=await pool.query("SELECT (SELECT count(*)::int FROM approvals WHERE run_id=$1) AS approvals,(SELECT count(*)::int FROM outbox_events WHERE aggregate_id=$1::text) AS events,(SELECT status FROM modernization_runs WHERE id=$1) AS status",[race.id]);
     assert.deepEqual(counts.rows[0],{approvals:1,events:1,status:"approved"});
     await assert.rejects(pool.query("UPDATE audit_events SET actor_name='modified' WHERE resource_id=$1",[race.id]));
+    const oldTier=env.DEPLOYMENT_TIER,oldException=env.PILOT_ALLOW_ADMIN_SELF_APPROVAL;
+    try{
+      env.DEPLOYMENT_TIER="pilot";env.PILOT_ALLOW_ADMIN_SELF_APPROVAL="true";
+      const admin={...actor("creator"),roles:["Modernization.Admin"]};
+      const unacknowledged=await seed();
+      await assert.rejects(approve(unacknowledged,admin),error=>error instanceof ApprovalFailure&&error.code==="PilotSelfApprovalAcknowledgementRequired");
+      await noWrites(unacknowledged.id);
+      const pilotStale=await seed();
+      await assert.rejects(approve(pilotStale,admin,"f".repeat(64),true),error=>error instanceof ApprovalFailure&&error.status===409);
+      await noWrites(pilotStale.id);
+      const pilotUnverified=await seed();
+      await pool.query("UPDATE verification_jobs SET report=jsonb_set(report,'{steps,2,tests,tests}','0'::jsonb) WHERE run_id=$1",[pilotUnverified.id]);
+      await assert.rejects(approve(pilotUnverified,admin,pilotUnverified.digest,true),error=>error instanceof ApprovalFailure&&error.code==="VerificationRequired");
+      await noWrites(pilotUnverified.id);
+      const nonAdmin=await seed();
+      await assert.rejects(approve(nonAdmin,actor("creator"),nonAdmin.digest,true),error=>error instanceof ApprovalFailure&&error.status===403);
+      await noWrites(nonAdmin.id);
+      const pilot=await seed();
+      await approve(pilot,admin,pilot.digest,true);
+      const audit=await pool.query("SELECT actor_id,data FROM audit_events WHERE resource_id=$1 AND action='transformation.approved'",[pilot.id]);
+      assert.equal(audit.rows[0].actor_id,"creator");
+      assert.equal(audit.rows[0].data.approvalMode,"pilot-admin-self");
+      assert.equal(audit.rows[0].data.selfApprovalException,true);
+      assert.equal(audit.rows[0].data.changesetDigest,pilot.digest);
+      const pilotCounts=await pool.query("SELECT (SELECT count(*)::int FROM approvals WHERE run_id=$1) AS approvals,(SELECT count(*)::int FROM outbox_events WHERE aggregate_id=$1::text) AS events",[pilot.id]);
+      assert.deepEqual(pilotCounts.rows[0],{approvals:1,events:1});
+      env.DEPLOYMENT_TIER="production";
+      const productionSelf=await seed();
+      await assert.rejects(approve(productionSelf,admin,productionSelf.digest,true),error=>error instanceof ApprovalFailure&&error.status===403);
+      await noWrites(productionSelf.id);
+    }finally{env.DEPLOYMENT_TIER=oldTier;env.PILOT_ALLOW_ADMIN_SELF_APPROVAL=oldException;}
     const version=await pool.query<{version:string}>("SELECT version()");
-    console.log(JSON.stringify({event:"approval.postgres.canary",passed:true,postgres:version.rows[0].version,migrations:migrations.length,selfApprovalRejected:true,contributorApprovalRejected:true,staleDigestRejected:true,tenantIsolation:true,zeroTestEvidenceRejected:true,concurrentApprovals:counts.rows[0],appendOnlyAudit:true}));
+    console.log(JSON.stringify({event:"approval.postgres.canary",passed:true,postgres:version.rows[0].version,migrations:migrations.length,selfApprovalRejected:true,contributorApprovalRejected:true,staleDigestRejected:true,tenantIsolation:true,zeroTestEvidenceRejected:true,concurrentApprovals:counts.rows[0],appendOnlyAudit:true,pilotAdminExceptionAudited:true,pilotAcknowledgementRequired:true,pilotStaleAndUnverifiedRejected:true,productionSelfApprovalRejected:true}));
   }finally{await pool.end();command(`${binaries}/pg_ctl`,["-D",directory,"-m","fast","-w","stop"],uid,gid);}
 }
 

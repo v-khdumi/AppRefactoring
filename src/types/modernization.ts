@@ -125,7 +125,7 @@ export interface AgentMessage { id: string; agentType: AgentType; role: "user"|"
 
 export interface TransformationRun {
   permissions?:{edit:boolean;manage:boolean};
-  approvalAccess?:{canApprove:boolean;reason:string};
+  approvalAccess?:{canApprove:boolean;reason:string;selfApprovalException?:boolean};
   publication?: {attempts:number;lastError?:string;nextAttemptAt?:string};
   validationExecution?: {id?:string;changesetDigest?:string;status:string;reason:string;updatedAt?:string;steps:Array<{variant:"baseline"|"candidate";project:string;command:string;exitCode:number|null;timedOut:boolean;log:string;durationMs:number;tests?:{tests:number;failed:number;skipped:number}}>};
   id: string;

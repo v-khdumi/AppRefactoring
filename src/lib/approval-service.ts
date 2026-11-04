@@ -1,16 +1,17 @@
 import type {PoolClient} from "pg";
 import type {UserContext} from "./auth";
 import {appendAudit} from "./audit";
-import {approvalAccess,contributorQuery,hasRequiredRole} from "./authorization-policy";
+import {approvalAccess,approvalPolicy,contributorQuery,hasRequiredRole} from "./authorization-policy";
 import {currentChanges,verifiedChangeset} from "./verification-record";
 import {changesetDigest} from "./verification-evidence";
 import {assertNoCredentials} from "./content-policy";
+import {env} from "./env";
 
 export class ApprovalFailure extends Error {
   constructor(message:string,public status:number,public code?:string){super(message);this.name="ApprovalFailure";}
 }
 
-export async function recordApproval(client:PoolClient,input:{id:string;actor:UserContext;commitSha:string;changesetDigest?:string;decision:"approved"|"rejected";comment?:string;requestId?:string}){
+export async function recordApproval(client:PoolClient,input:{id:string;actor:UserContext;commitSha:string;changesetDigest?:string;decision:"approved"|"rejected";comment?:string;requestId?:string;acknowledgePilotSelfApproval?:boolean}){
   const {id,actor}=input;
   if(!hasRequiredRole(actor.roles,["Modernization.Approver","Modernization.Admin"]))throw new ApprovalFailure("The requested operation is not permitted.",403);
   assertNoCredentials([{path:"approval comment",content:input.comment||""}]);
@@ -19,10 +20,14 @@ export async function recordApproval(client:PoolClient,input:{id:string;actor:Us
   if(!run)throw new ApprovalFailure("Transformation run not found.",404);
   if(run.status!=="awaiting-approval")throw new ApprovalFailure("The run is not awaiting approval.",409);
   if(!run.source_commit_sha||run.source_commit_sha!==input.commitSha)throw new ApprovalFailure("The reviewed source commit has changed. Refresh and review the changes again.",409);
+  let selfApprovalException=false;
+  const policy=approvalPolicy(env);
   if(input.decision==="approved"){
     const contributions=await client.query<{contributed:boolean}>(contributorQuery,[id,actor.tenantId,actor.id]);
-    const access=approvalAccess(actor.roles,actor.id,run.created_by,Boolean(contributions.rows[0]?.contributed));
+    const access=approvalAccess(actor.roles,actor.id,run.created_by,Boolean(contributions.rows[0]?.contributed),policy);
     if(!access.canApprove)throw new ApprovalFailure(access.reason,403);
+    selfApprovalException=access.selfApprovalException===true;
+    if(selfApprovalException&&input.acknowledgePilotSelfApproval!==true)throw new ApprovalFailure("Explicitly acknowledge the pilot administrator self-approval exception before approving this changeset.",403,"PilotSelfApprovalAcknowledgementRequired");
     if(!await verifiedChangeset(client,id,actor.tenantId,input.commitSha))throw new ApprovalFailure("Run isolated verification for the current changeset before approval.",409,"VerificationRequired");
     if(input.changesetDigest!==changesetDigest(input.commitSha,await currentChanges(client,id)))throw new ApprovalFailure("The reviewed changeset has changed. Refresh and review it again.",409);
   }
@@ -31,5 +36,5 @@ export async function recordApproval(client:PoolClient,input:{id:string;actor:Us
   await client.query("INSERT INTO approvals(run_id,commit_sha,approved_by,decision,comment) VALUES($1,$2,$3,$4,$5)",[id,input.commitSha,actor.id,input.decision,input.comment]);
   await client.query("UPDATE modernization_runs SET status=$1,current_stage=$3,error_code=NULL,error_detail=NULL,updated_at=now(),version=version+1 WHERE id=$2",[input.decision==="approved"?"approved":"rejected",id,input.decision==="approved"?"publication-queued":"rejected"]);
   if(input.decision==="approved")await client.query("INSERT INTO outbox_events(tenant_id,event_type,aggregate_id,payload) VALUES($1,'pull-request.requested',$2,$3::jsonb)",[actor.tenantId,id,JSON.stringify({runId:id,commitSha:input.commitSha,changesetDigest:input.changesetDigest,requestedBy:actor.id})]);
-  await appendAudit(client,{tenantId:actor.tenantId,actor,action:`transformation.${input.decision}`,resourceType:"run",resourceId:id,data:{commitSha:input.commitSha,comment:input.comment},requestId:input.requestId});
+  await appendAudit(client,{tenantId:actor.tenantId,actor,action:`transformation.${input.decision}`,resourceType:"run",resourceId:id,data:{commitSha:input.commitSha,changesetDigest:input.changesetDigest,comment:input.comment,approvalMode:input.decision==="approved"?(selfApprovalException?"pilot-admin-self":"independent"):"rejected",deploymentTier:policy.deploymentTier,selfApprovalException},requestId:input.requestId});
 }

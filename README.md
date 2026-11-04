@@ -15,7 +15,7 @@ ModernizeAI is an engineering control center for analyzing and incrementally mod
 - Exact file-level change manifest and side-by-side before/after diffs.
 - Rationale and validation evidence for every proposed file change.
 - Executed baseline/candidate build and test evidence, dependency audits, and configured strategy acceptance checks.
-- Independent human approval before pull-request creation; initiators and contributors cannot approve their own work.
+- Independent human approval by default; production forbids self-approval. A separately enabled pilot-only administrator exception requires per-changeset acknowledgement and an immutable audit record.
 - Immutable activity-log experience.
 - Coordinated sequential specialists for architecture, frontend, backend, cloud, testing, and security.
 - Per-agent ownership, status, progress, and conversational refinement.

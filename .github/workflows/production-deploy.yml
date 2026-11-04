@@ -134,7 +134,7 @@ jobs:
       - name: Deploy outbox
         run: az containerapp update --name "$SERVICE_OUTBOX_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$OUTBOX_IMAGE" --output none
       - name: Deploy web
-        run: az containerapp update --name "$SERVICE_WEB_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WEB_IMAGE" --output none
+        run: az containerapp update --name "$SERVICE_WEB_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WEB_IMAGE" --set-env-vars DEPLOYMENT_TIER=production PILOT_ALLOW_ADMIN_SELF_APPROVAL=false --output none
       - name: Verify operational health
         shell: bash
         run: |

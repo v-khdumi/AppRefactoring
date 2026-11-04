@@ -2,10 +2,23 @@ export function hasRequiredRole(roles:string[],requiredRoles:string[]){
   return requiredRoles.length===0||requiredRoles.some(role=>roles.includes(role)||role==="Modernization.Reader"&&roles.includes("Modernization.Approver"));
 }
 
-export function approvalAccess(roles:string[],userId:string,createdBy:string,contributed:boolean){
+export interface ApprovalPolicy {
+  deploymentTier:"production"|"pilot";
+  allowAdminSelfApproval:boolean;
+}
+export interface ApprovalAccess {canApprove:boolean;reason:string;selfApprovalException?:boolean}
+
+export function approvalPolicy(configuration:{DEPLOYMENT_TIER:"production"|"pilot";PILOT_ALLOW_ADMIN_SELF_APPROVAL:"true"|"false"}):ApprovalPolicy{
+  return {deploymentTier:configuration.DEPLOYMENT_TIER,allowAdminSelfApproval:configuration.DEPLOYMENT_TIER==="pilot"&&configuration.PILOT_ALLOW_ADMIN_SELF_APPROVAL==="true"};
+}
+
+export function approvalAccess(roles:string[],userId:string,createdBy:string,contributed:boolean,policy:ApprovalPolicy={deploymentTier:"production",allowAdminSelfApproval:false}):ApprovalAccess{
   if(!hasRequiredRole(roles,["Modernization.Approver","Modernization.Admin"]))return {canApprove:false,reason:"The Approver or Administrator role is required."};
   if(!createdBy)return {canApprove:false,reason:"The run initiator is missing; independent approval cannot be established."};
-  if(userId===createdBy||contributed)return {canApprove:false,reason:"An independent reviewer must approve this changeset. Initiators and contributors cannot approve their own work."};
+  if(userId===createdBy||contributed){
+    if(policy.deploymentTier==="pilot"&&policy.allowAdminSelfApproval&&roles.includes("Modernization.Admin"))return {canApprove:true,reason:"Pilot administrator self-approval requires explicit acknowledgement and current verification evidence.",selfApprovalException:true};
+    return {canApprove:false,reason:"An independent reviewer must approve this changeset. Initiators and contributors cannot approve their own work."};
+  }
   return {canApprove:true,reason:""};
 }
 

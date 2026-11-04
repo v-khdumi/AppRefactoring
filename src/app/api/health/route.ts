@@ -62,7 +62,7 @@ export async function GET(request:Request){
       const configured=Boolean(env.DATABASE_URL&&isFoundryConfigured()&&(namespace||env.AZURE_SERVICE_BUS_CONNECTION_STRING)&&env.VERIFICATION_JOB_RESOURCE_ID&&env.VERIFICATION_PUBLIC_ORIGIN);
       const degraded=!configured||deep&&(!operationallyReady(workers,queue)||verification?.status!=="reachable");
       return NextResponse.json({
-        status:degraded?"degraded":"healthy",mode:"live",
+        status:degraded?"degraded":"healthy",mode:"live",deploymentTier:env.DEPLOYMENT_TIER,
         checks:{database:env.DATABASE_URL?"healthy":"not-configured",foundry:isFoundryConfigured()?"configured-not-probed":"not-configured",verification:env.VERIFICATION_JOB_RESOURCE_ID&&env.VERIFICATION_PUBLIC_ORIGIN?"configured":"not-configured",githubWebhook:env.GITHUB_WEBHOOK_ENABLED==="true"?"signature-required":"disabled"},
         ...(deep?{operations:{workers,queue,verification}}:{}),
       },{status:degraded?503:200,headers});

@@ -268,6 +268,25 @@ Azure release was deployed, or that the qualification blockers above are closed.
 
 ## Release gates
 
+### Explicit single-operator pilot approval policy
+
+The operator may choose a pilot-only Administrator self-approval exception.
+It requires both `DEPLOYMENT_TIER=pilot` and
+`PILOT_ALLOW_ADMIN_SELF_APPROVAL=true`; the default is production/false.
+The source initiator and contributor restrictions remain unchanged for ordinary
+Approvers and all production deployments. Missing initiator identity is never
+waived. Enabling the exception for a production tier fails configuration checks,
+and production IaC/workflow force the exception off.
+
+For an eligible administrator, Execution shows a per-changeset acknowledgement.
+The API independently requires this acknowledgement and still checks the exact
+source SHA, current verified changeset digest, Testing Agent result and every
+file's evidence under the run transaction lock. Edits invalidate the old evidence
+and acknowledgement. The immutable approval audit records the actual actor,
+digest, deployment tier and `approvalMode=pilot-admin-self`; no separate reviewer
+identity is invented. Enabling the policy alone never approves or publishes a
+run; the operator must review and explicitly submit the approval.
+
 A production release is permitted only when all of these gates pass:
 
 1. Unit and safety tests, lint, TypeScript, Next.js production build, dependency audit, CodeQL, container scan, and Bicep compilation are green.
