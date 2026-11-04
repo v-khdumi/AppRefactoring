@@ -165,6 +165,26 @@ and secret scanning, retaining the existing `ignore-unfixed` policy. A final
 release must still be tied to the exact built/scanned digest. No canary or
 deployment success is implied until its corresponding evidence is recorded.
 
+The authenticated transcript analysis reached Foundry but failed with
+`AuthenticationTypeDisabled`: the existing Foundry account has local key
+authentication disabled. The operator approved Managed Identity, leaving that
+policy intact. Account-scoped Cognitive Services User assignments were granted
+only to the existing pilot web and worker identities. An inference request
+executed inside the actual web identity returned HTTP 200 without a key.
+
+The App webhook configuration API returned 404 and no webhook/secret change was
+made. The operator explicitly approved a pilot without webhook ingestion:
+`GITHUB_WEBHOOK_ENABLED=false` makes the receiver reject all deliveries with
+HTTP 503 and exposes the disabled status through health/settings. Enabled
+deployments still require the matching webhook secret; the flag does not waive
+GitHub App authentication, source-bound verification or independent approval.
+Re-enable ingestion only after the App owner configures and validates it.
+
+The operator authorized a controlled `rg-demo` rollout after passing CI and
+container scans because the old application cannot perform Managed Identity
+inference. The transcript canary must run immediately afterward; keep prior
+revision/image references for rollback and do not synthesize approval actors.
+
 ### GitHub integration validation
 
 The modernization expansion was integrated with the previously merged production

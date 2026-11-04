@@ -25,6 +25,10 @@ changes and creates a draft pull request.
 
 The user-assigned identity client ID is injected separately from the Entra API
 application ID. Liveness uses `/api/health/live`; readiness uses `/api/health`.
+Set `foundryAuthMode=managed-identity` for Foundry accounts with local
+authentication disabled, and grant the runtime web/worker identity the required
+inference role on that exact account. Do not re-enable key authentication to
+bypass the account's policy. `api-key` remains an explicit compatibility mode.
 The release workflow updates the migration job to the scanned release worker
 image and waits for that exact execution to succeed before deploying the worker,
 outbox and web. Windows execution remains subject to the qualification gates

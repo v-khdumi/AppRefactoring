@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { verifyGitHubSignature } from "@/lib/github-app";
 import { query } from "@/lib/db";
+import {env} from "@/lib/env";
 
 export async function POST(request: Request) {
+  if(env.GITHUB_WEBHOOK_ENABLED==="false")return NextResponse.json({error:"GitHub webhook ingestion is explicitly disabled for this deployment."},{status:503,headers:{"Cache-Control":"no-store"}});
   const contentLength=Number(request.headers.get("content-length")||0);
   if(contentLength>1_000_000)return NextResponse.json({error:"Webhook payload is too large."},{status:413});
   const rawBody = await request.text();

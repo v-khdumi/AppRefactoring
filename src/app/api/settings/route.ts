@@ -19,7 +19,7 @@ export async function GET(request: Request) {
     const user = await requireUser(request, ["Modernization.Reader", "Modernization.Admin"]);
     if (demoEnabled) return NextResponse.json(defaults);
     const result = await query<{ policies: Record<string, boolean>; notifications: Record<string, boolean> }>("SELECT policies,notifications FROM organization_settings WHERE tenant_id=$1", [user.tenantId]);
-    return NextResponse.json({policies:defaults.policies,notifications:{...defaults.notifications,...result.rows[0]?.notifications},runtime:{model:env.AZURE_AI_FOUNDRY_MODEL,sources:[{provider:"github",origin:"https://github.com",configured:Boolean(env.GITHUB_APP_ID&&env.GITHUB_APP_PRIVATE_KEY)}]}});
+    return NextResponse.json({policies:defaults.policies,notifications:{...defaults.notifications,...result.rows[0]?.notifications},runtime:{model:env.AZURE_AI_FOUNDRY_MODEL,githubWebhookEnabled:env.GITHUB_WEBHOOK_ENABLED==="true",sources:[{provider:"github",origin:"https://github.com",configured:Boolean(env.GITHUB_APP_ID&&env.GITHUB_APP_PRIVATE_KEY)}]}});
   } catch (error) { return failure(error); }
 }
 

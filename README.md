@@ -76,7 +76,8 @@ Configure these server-only environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `AZURE_AI_FOUNDRY_ENDPOINT` | Foundry model inference endpoint |
-| `AZURE_AI_FOUNDRY_API_KEY` | Server-side inference access key, injected through Key Vault in production |
+| `AZURE_AI_FOUNDRY_API_KEY` | Server-side inference key, used only in explicit `api-key` mode |
+| `AZURE_AI_FOUNDRY_AUTH_MODE` | `api-key` or `managed-identity`; Managed Identity uses Cognitive Services audience tokens and requires account-scoped inference RBAC |
 | `AZURE_AI_FOUNDRY_MODEL` | Model or deployment name |
 | `AZURE_AI_FOUNDRY_API_VERSION` | Model inference API version |
 | `DEMO_MODE` | Set to `false` to require live integrations |

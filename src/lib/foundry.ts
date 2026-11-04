@@ -3,6 +3,8 @@ import { estimateModernization } from "@/lib/estimation";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { foundryModelParameters } from "@/lib/foundry-model";
 import {assertNoCredentials} from "./content-policy";
+import {env} from "./env";
+import {foundryConfigured,foundryHeaders} from "./foundry-auth";
 
 interface FoundryInput {
   repositoryName: string;
@@ -15,21 +17,20 @@ interface FoundryInput {
 }
 
 export function isFoundryConfigured() {
-  return Boolean(process.env.AZURE_AI_FOUNDRY_ENDPOINT && process.env.AZURE_AI_FOUNDRY_API_KEY);
+  return foundryConfigured();
 }
 
 export async function analyzeWithFoundry(input: FoundryInput, signal?: AbortSignal): Promise<AnalysisResult> {
   assertNoCredentials([...input.samples,{path:"analysis options",content:JSON.stringify(input.options)}]);
-  const endpoint = process.env.AZURE_AI_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
-  const apiKey = process.env.AZURE_AI_FOUNDRY_API_KEY;
-  const model = process.env.AZURE_AI_FOUNDRY_MODEL || "gpt-6-astra";
+  const endpoint = env.AZURE_AI_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
+  const model = env.AZURE_AI_FOUNDRY_MODEL;
   const apiVersion = process.env.AZURE_AI_FOUNDRY_API_VERSION || "2024-05-01-preview";
-  if (!endpoint || !apiKey) throw new Error("Microsoft Foundry is not configured.");
+  if (!endpoint || !isFoundryConfigured()) throw new Error("Microsoft Foundry is not configured.");
 
   const system = `You are a principal software modernization architect. Analyze legacy code without inventing behavior. Return strict JSON matching this shape: {summary:string, confidence:number 0-100, currentArchitecture:Array<{id,label,detail,kind}>, targetArchitecture:Array<{id,label,detail,kind}>, findings:Array<{title,detail,severity,file?}>, recommendations:string[], migrationPhases:Array<{title,description,duration}>, behaviorContracts:string[]}. kind must be client|service|data|integration|cloud; severity must be critical|high|medium|low. Preserve existing behavior, flag uncertainty, recommend incremental strangler migrations and characterization tests. Do not include markdown.`;
   const response = await resilientFetch(`${endpoint}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "api-key": apiKey },
+    headers:await foundryHeaders(signal),
     body: JSON.stringify({
       model,
       ...foundryModelParameters(model,0.1),

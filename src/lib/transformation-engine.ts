@@ -7,6 +7,7 @@ import { agentGenerationPolicy, AgentOwnershipError, assertAgentChangeAreas, ass
 import {coordinationContractSchema,coordinationInstructions} from "./coordination-contract";
 import {scenarioForOptions,scenarioInstructions,scenarioRequirements,scenarioAcceptance,acceptanceManifestPath} from "./modernization-scenarios";
 import {assertNoCredentials} from "./content-policy";
+import {foundryConfigured,foundryHeaders} from "./foundry-auth";
 
 const changeSchema = z.object({
   path: z.string().min(1).max(500),
@@ -48,7 +49,7 @@ export async function generateTransformationPlan(input: {
   files: Array<{ path: string; content: string }>;
 }, onOutput?: (output: string) => Promise<void>, correctionFeedback?: string): Promise<GeneratedPlan> {
   assertNoCredentials([...input.files,{path:"modernization options",content:JSON.stringify(input.options)}]);
-  if (!env.AZURE_AI_FOUNDRY_ENDPOINT || !env.AZURE_AI_FOUNDRY_API_KEY) throw new Error("Microsoft Foundry is not configured.");
+  if (!env.AZURE_AI_FOUNDRY_ENDPOINT || !foundryConfigured()) throw new Error("Microsoft Foundry is not configured.");
   const basePolicy = agentGenerationPolicy(input.options.agentType);
   const scenario=scenarioForOptions(input.options);
   const scenarioPolicy=`Modernization strategy: ${scenario}. ${scenarioInstructions(scenario)} Required strategy-specific checks: ${JSON.stringify(scenarioRequirements(scenario))}. The Testing Agent owns ${acceptanceManifestPath} and additive runtime-independent harnesses under tests/modernization/; other agents must only document expectations, not create test artifacts. ${basePolicy.agent==="testing"?`When required, create this manifest: {version:1,scenario:'${scenario}',checks:[{id:'unique-id',kind:'contract'|'integration'|'image-build'|'migration'|'rollback'|'data-parity'|'ai'|'authorization',project:'.',variants:['baseline','candidate'],command:'node',args:['tests/modernization/check.cjs'],report:{path:'.modernize-reports/check.json',format:'json'|'junit'|'tap'},timeoutSeconds:240}]}. JSON reports use Jest/Vitest counters numTotalTests,numPassedTests,numFailedTests,numPendingTests. Reports must be machine-readable, nonempty and have no skips. Do not add a manifest for upgrade/refactor unless it adds meaningful acceptance coverage.`:""} Do not invent a successful execution, change an original harness or weaken a check to obtain a pass.`;
@@ -57,7 +58,7 @@ export async function generateTransformationPlan(input: {
   const endpoint = env.AZURE_AI_FOUNDRY_ENDPOINT.replace(/\/$/, "");
   const response = await resilientFetch(`${endpoint}/chat/completions?api-version=${encodeURIComponent(process.env.AZURE_AI_FOUNDRY_API_VERSION || "2024-05-01-preview")}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "api-key": env.AZURE_AI_FOUNDRY_API_KEY },
+    headers:await foundryHeaders(),
     body: JSON.stringify({ model: env.AZURE_AI_FOUNDRY_MODEL, stream: Boolean(onOutput), ...foundryModelParameters(env.AZURE_AI_FOUNDRY_MODEL,0.05), response_format: { type: "json_object" }, messages: [{ role: "system", content: `${system} Write summary first as a concise public explanation of the proposed decisions, assumptions, and verification still required. Do not claim commands or tests were executed. Write each path and rationale before its after content.` }, { role: "user", content: JSON.stringify(input) }] }),
     attempts: 3,
     retryNetworkErrors: !onOutput,

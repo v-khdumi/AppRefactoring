@@ -14,6 +14,9 @@ param postgresAdminPassword string
 @secure()
 param foundryApiKey string
 param foundryEndpoint string
+@allowed(['api-key', 'managed-identity'])
+@description('Use managed-identity when the Foundry account disables local key authentication.')
+param foundryAuthMode string = 'api-key'
 param foundryModel string = 'gpt-6-astra'
 param entraTenantId string
 param entraClientId string
@@ -22,6 +25,8 @@ param githubAppId string
 param githubAppPrivateKey string
 @secure()
 param githubWebhookSecret string
+@description('Keep enabled for production; an explicitly limited pilot may disable ingestion.')
+param githubWebhookEnabled bool = true
 @secure()
 @minLength(32)
 param healthCheckToken string
@@ -550,6 +555,7 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'AZURE_SERVICE_BUS_NAMESPACE', value: '${serviceBus.name}.servicebus.windows.net' }
             { name: 'AZURE_SERVICE_BUS_QUEUE', value: queue.name }
             { name: 'AZURE_AI_FOUNDRY_ENDPOINT', value: foundryEndpoint }
+            { name: 'AZURE_AI_FOUNDRY_AUTH_MODE', value: foundryAuthMode }
             { name: 'AZURE_AI_FOUNDRY_API_KEY', secretRef: 'foundry-key' }
             { name: 'AZURE_AI_FOUNDRY_MODEL', value: foundryModel }
             { name: 'AZURE_TENANT_ID', value: entraTenantId }
@@ -559,6 +565,7 @@ resource app 'Microsoft.App/containerApps@2025-02-02-preview' = {
             { name: 'GITHUB_APP_ID', value: githubAppId }
             { name: 'GITHUB_APP_PRIVATE_KEY', secretRef: 'github-key' }
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook' }
+            { name: 'GITHUB_WEBHOOK_ENABLED', value: string(githubWebhookEnabled) }
             { name: 'HEALTH_CHECK_TOKEN', secretRef: 'health-token' }
             { name: 'VERIFICATION_JOB_RESOURCE_ID', value: verification.outputs.jobResourceId }
             { name: 'VERIFICATION_PUBLIC_ORIGIN', value: verificationOrigin }
@@ -628,6 +635,7 @@ resource transformationWorker 'Microsoft.App/containerApps@2025-02-02-preview' =
             { name: 'AZURE_SERVICE_BUS_NAMESPACE', value: '${serviceBus.name}.servicebus.windows.net' }
             { name: 'AZURE_SERVICE_BUS_QUEUE', value: queue.name }
             { name: 'AZURE_AI_FOUNDRY_ENDPOINT', value: foundryEndpoint }
+            { name: 'AZURE_AI_FOUNDRY_AUTH_MODE', value: foundryAuthMode }
             { name: 'AZURE_AI_FOUNDRY_API_KEY', secretRef: 'foundry-key' }
             { name: 'AZURE_AI_FOUNDRY_MODEL', value: foundryModel }
             { name: 'GITHUB_APP_ID', value: githubAppId }

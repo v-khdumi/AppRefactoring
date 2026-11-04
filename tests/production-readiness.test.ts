@@ -50,6 +50,10 @@ test("GitHub App credentials remain mandatory and cannot be replaced by legacy p
   const configuration=parseEnvironment({...production,GITHUB_APP_ID:"",GITHUB_APP_PRIVATE_KEY:"",GITHUB_WEBHOOK_SECRET:"",SOURCE_CONNECTIONS:JSON.stringify([{provider:"gitlab",origin:"https://gitlab.example.test",token:"test-service-credential"}])});
   assert.throws(()=>assertProductionConfiguration(configuration),/GITHUB_APP_ID.*GITHUB_APP_PRIVATE_KEY.*GITHUB_WEBHOOK_SECRET/);
 });
+test("disabled pilot webhook ingestion is explicit and does not waive enabled webhook secrets",()=>{
+  assert.doesNotThrow(()=>assertProductionConfiguration(parseEnvironment({...production,GITHUB_WEBHOOK_ENABLED:"false",GITHUB_WEBHOOK_SECRET:""})));
+  assert.throws(()=>assertProductionConfiguration(parseEnvironment({...production,GITHUB_WEBHOOK_ENABLED:"true",GITHUB_WEBHOOK_SECRET:""})),/GITHUB_WEBHOOK_SECRET/);
+});
 
 test("connection string authentication is not replaced with managed identity", () => {
   const configuration = parseEnvironment({ ...production, AZURE_SERVICE_BUS_NAMESPACE: "", AZURE_SERVICE_BUS_CONNECTION_STRING: "Endpoint=sb://modernize.servicebus.windows.net/;SharedAccessKeyName=test;SharedAccessKey=test" });

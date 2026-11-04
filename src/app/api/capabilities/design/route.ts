@@ -9,6 +9,7 @@ import {enforceRateLimit} from "@/lib/rate-limit";
 import {assertNoCredentials,ContentPolicyError} from "@/lib/content-policy";
 import {capabilityRequestSchema,capabilityDesignSchema,capabilityServices,rulesCapabilityDesign,type CapabilityRequest} from "@/lib/capability-design";
 import {withRequestDeadline,RequestDeadlineError} from "@/lib/request-deadline";
+import {foundryConfigured,foundryHeaders} from "@/lib/foundry-auth";
 
 function rulesResponse(input:CapabilityRequest,warning:string,demo=false){
   if(!demo)console.warn("Capability design used an explicitly labelled rules draft",warning);
@@ -26,11 +27,11 @@ export async function POST(request:Request){
     const input=capabilityRequestSchema.parse(await request.json());
     assertNoCredentials([{path:"capability requirements",content:JSON.stringify(input)}]);
     if(demo)return rulesResponse(input,"Demonstration requirements draft; no model inference or external integration was executed.",true);
-    if(!env.AZURE_AI_FOUNDRY_ENDPOINT||!env.AZURE_AI_FOUNDRY_API_KEY)return rulesResponse(input,"Foundry is not configured. This is a rules-based requirements draft, not an AI analysis.");
+    if(!env.AZURE_AI_FOUNDRY_ENDPOINT||!foundryConfigured())return rulesResponse(input,"Foundry is not configured. This is a rules-based requirements draft, not an AI analysis.");
     return await withRequestDeadline(async signal=>{
       const system=`You are a senior AI product architect. Turn the requested feature and all clarification answers into an application-specific implementation design. Ask at most four essential questions with status needs-clarification; otherwise use ready. Return JSON with status, name, summary, questions [{id,question,why,options,required}], frontend, backend, data, azure, services, testing, security, acceptanceCriteria. Every ready design needs meaningful frontend, backend, data, testing, security and measurable acceptance criteria. services contains only explicit required values from ${capabilityServices.join(", ")}; do not infer provisioned resources from prose. Distinguish mocks from live integrations and require an executed acceptance harness. Never claim execution, approval or deployment.`;
       const response=await resilientFetch(`${env.AZURE_AI_FOUNDRY_ENDPOINT!.replace(/\/$/,"")}/chat/completions?api-version=${encodeURIComponent(process.env.AZURE_AI_FOUNDRY_API_VERSION||"2024-05-01-preview")}`,{
-        method:"POST",headers:{"Content-Type":"application/json","api-key":env.AZURE_AI_FOUNDRY_API_KEY!},
+        method:"POST",headers:await foundryHeaders(signal),
         body:JSON.stringify({model:env.AZURE_AI_FOUNDRY_MODEL,...foundryModelParameters(env.AZURE_AI_FOUNDRY_MODEL,.05),response_format:{type:"json_object"},messages:[{role:"system",content:system},{role:"user",content:JSON.stringify(input)}]}),
         attempts:2,timeoutMs:45000,operation:"foundry.capability_design",signal,
       });
