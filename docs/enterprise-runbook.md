@@ -287,6 +287,36 @@ digest, deployment tier and `approvalMode=pilot-admin-self`; no separate reviewe
 identity is invented. Enabling the policy alone never approves or publishes a
 run; the operator must review and explicitly submit the approval.
 
+The operator chose and enabled this exception for the existing pilot on
+2026-11-05. Web/API source `ac8dc8257a90a572ed4902e3b9610fa77b7437cc` is
+deployed as `modernize-demo-7pd4tn-web--rac8dc82`, immutable digest
+`sha256:67b605c080bf4418ade0bc1bdb2e673c4c0867900b85689526448688dd07dd66`
+from ACR build `ca4p`. Worker and outbox revisions were left unchanged.
+All 177 platform tests, production build, TypeScript, lint and Bicep passed;
+GitHub Quality `41925969319`, CodeQL `41925969504` and Container security
+`41925969388` succeeded. The exact web digest also passed the dedicated
+all-severity/secret scan `modernize-approve-scan-40f315b8-5w3xixo`.
+
+The identity-free PostgreSQL canary
+`modernize-selfapprove-40f315b8-6b9lmbw` verified seven migrations in an isolated
+database, explicit acknowledgement, real-actor exception auditing, stale and
+unverified changeset rejection, non-administrator rejection, production denial,
+append-only audit and exactly one approval/outbox event under concurrent review.
+Both temporary validation jobs were removed afterward.
+
+The real transcript initiating administrator subsequently acknowledged and
+approved the verified changeset through the application UI. Read-only inspection
+confirmed `approvalMode=pilot-admin-self`, `deploymentTier=pilot`, the real audit
+actor matching the initiator and the unchanged verified digest. No assistant API
+approval or fabricated independent identity was used. Publication created
+[v-khdumi/transcript#2](https://github.com/v-khdumi/transcript/pull/2), confirmed
+open, draft and unmerged, from source
+`2f91b4f0898b6c425bd28a6c528679e161dbbe3e` to generated head
+`b2476a8bf517ed6268d9cc92cdb49c29b9ac4a51`. The source branch remained unchanged.
+Deep readiness remained healthy with two fresh workers, a reachable verifier and
+zero queue/dead-letter messages. This pilot exception does not qualify as
+independent production approval.
+
 A production release is permitted only when all of these gates pass:
 
 1. Unit and safety tests, lint, TypeScript, Next.js production build, dependency audit, CodeQL, container scan, and Bicep compilation are green.
