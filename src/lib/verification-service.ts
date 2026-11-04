@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import {managedIdentityCredential} from "./managed-identity";
+import { managedIdentityCredential } from "./azure-identity";
 import type { PoolClient } from "pg";
 import { query, transaction } from "./db";
 import { env } from "./env";
@@ -21,9 +21,11 @@ export function windowsContainerGroupId(jobId:string){
   return `${group}/providers/Microsoft.ContainerInstance/containerGroups/mz-winverify-${jobId.replace(/-/g,"").slice(0,24)}`;
 }
 async function managementToken(){return (await managedIdentityCredential().getToken("https://management.azure.com/.default")).token;}
-export async function verificationRuntimeHealth(){
+export async function verificationRuntimeHealth(signal?:AbortSignal){
   if(!env.VERIFICATION_JOB_RESOURCE_ID||!env.VERIFICATION_PUBLIC_ORIGIN)return {status:"not-configured"};
-  const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${await managementToken()}`},signal:AbortSignal.timeout(15000)});
+  const access=await managedIdentityCredential().getToken("https://management.azure.com/.default",{abortSignal:signal});
+  const timeout=AbortSignal.timeout(15000);
+  const response=await fetch(`https://management.azure.com${env.VERIFICATION_JOB_RESOURCE_ID}?api-version=2024-03-01`,{headers:{Authorization:`Bearer ${access.token}`},signal:signal?AbortSignal.any([signal,timeout]):timeout});
   if(!response.ok)throw new Error(`Verification runtime readiness failed (${response.status}).`);
   const job=await response.json() as {properties?:{configuration?:{triggerType?:string};template?:{containers?:Array<{name?:string}>}}};
   if(job.properties?.configuration?.triggerType!=="Manual"||!job.properties.template?.containers?.some(container=>container.name==="runner"))throw new Error("The verification job is not configured for manual runner dispatch.");

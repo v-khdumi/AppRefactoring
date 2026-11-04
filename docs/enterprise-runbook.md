@@ -147,6 +147,23 @@ C/C++ and COBOL compile/test canaries ran, but mandatory dependency audits found
 unrated or incomplete external evidence and blocked the candidates. These are
 open qualification items, not claims that arbitrary repositories can publish.
 
+### GitHub integration validation
+
+The modernization expansion was integrated with the previously merged production
+hardening changes, retaining local font assets, dependency-independent liveness,
+bounded readiness queries, explicit runtime identity selection, connection-string
+authentication, database idle-client error handling and migration success
+waiting. The release workflow reuses the tested migration helper and deploys
+only scanned image digests. The web image explicitly packages every verifier
+helper served through scoped job capabilities.
+
+The combined revision passed all 181 tests without skips, full lint, TypeScript,
+the production build, Bicep compilation and a zero-vulnerability production
+dependency audit. Migration helper tests execute on both Linux and Windows/Git
+Bash rather than skipping Windows coverage. This local integration evidence does
+not assert that GitHub Actions CodeQL/container scans have completed, that a new
+Azure release was deployed, or that the qualification blockers above are closed.
+
 ## Release gates
 
 A production release is permitted only when all of these gates pass:
@@ -175,7 +192,9 @@ the OIDC deployment identity. Also set `SERVICE_WEB_NAME`, `SERVICE_WORKER_NAME`
 `SERVICE_OUTBOX_NAME`, `MIGRATION_JOB_NAME` and `AZURE_CONTAINER_REGISTRY_ENDPOINT`
 from the approved infrastructure outputs; the workflow validates those explicit
 resources without depending on local `azd` state. Protect `main`, require the Quality gates, CodeQL,
-and Container security checks, require review, and disallow force pushes.
+and Container security checks, require review, and disallow force pushes. The
+resource group must already be provisioned; neither the federated deployment
+identity nor the runtime user-assigned identity is the browser API application.
 
 ## Required Azure configuration
 
@@ -196,11 +215,25 @@ For a controlled manual release:
 ```powershell
 azd auth login
 azd provision --no-prompt
-az containerapp job start --name (azd env get-value MIGRATION_JOB_NAME) --resource-group (azd env get-value AZURE_RESOURCE_GROUP)
-azd deploy --all --no-prompt
+azd deploy worker --no-prompt
+$group = azd env get-value AZURE_RESOURCE_GROUP
+$worker = azd env get-value SERVICE_WORKER_NAME
+$image = az containerapp show --name $worker --resource-group $group --query "properties.template.containers[0].image" --output tsv
+bash scripts/deploy-migrations.sh $group (azd env get-value MIGRATION_JOB_NAME) $image
+if ($LASTEXITCODE -ne 0) { throw "Database migration release gate failed." }
+azd deploy outbox --no-prompt
+azd deploy web --no-prompt
 ```
 
-After deployment, validate shallow and authenticated deep health. Never log the health token.
+The migration gate updates the job image to the release worker image, starts a
+specific execution, and fails on an unsuccessful, unexpected, or timed-out result.
+Starting a job is not evidence that migrations completed.
+
+After deployment, validate shallow and authenticated deep health. Never log the
+health token. Deep health returns HTTP 503 for missing, stale, starting, stopping,
+or degraded required workers, queue failures, and nonzero dead letters.
+Use `/api/health/live` only for restart probes: it deliberately ignores external
+dependencies, while `/api/health` is the readiness gate.
 
 ## Rollback
 

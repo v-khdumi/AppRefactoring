@@ -1,6 +1,6 @@
 import { ServiceBusClient, type ServiceBusReceivedMessage } from "@azure/service-bus";
 import {randomUUID} from "node:crypto";
-import {managedIdentityCredential} from "../src/lib/managed-identity";
+import { managedIdentityCredential } from "../src/lib/azure-identity";
 import { env, serviceBusNamespace } from "../src/lib/env";
 import { database, transaction } from "../src/lib/db";
 import { readSourceRepository,readSourceSnapshot } from "../src/lib/source-provider";

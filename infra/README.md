@@ -10,7 +10,7 @@ hostile-code qualification; those release gates still apply.
 
 Before deployment:
 
-1. Build and push immutable web and worker images to Azure Container Registry. Pass `NEXT_PUBLIC_AZURE_TENANT_ID`, `NEXT_PUBLIC_AZURE_CLIENT_ID`, and `NEXT_PUBLIC_AZURE_API_SCOPE` as web image build arguments.
+1. Build and push immutable web, worker, and outbox images to Azure Container Registry. Pass `NEXT_PUBLIC_AZURE_TENANT_ID`, `NEXT_PUBLIC_AZURE_CLIENT_ID`, and `NEXT_PUBLIC_AZURE_API_SCOPE` as web image build arguments.
 2. Create the Microsoft Entra API application and roles: `Modernization.Reader`, `Modernization.Admin`, and `Modernization.Approver`.
 3. Create and install a GitHub App with repository metadata, contents, and pull-request permissions.
 4. Store GitHub App credentials and webhook secret as Container App secrets or Key Vault references.
@@ -19,7 +19,16 @@ Before deployment:
 5. Deploy the template with organization-approved networking parameters; use private endpoints for regulated environments.
 6. Run `npm run db:migrate` as a one-off deployment job before directing traffic to the new revision.
 
-The worker image runs `worker/index.ts` by default. The outbox Container App overrides the command with `worker/outbox.ts`; it publishes only commit-bound, human-approved changes and creates a draft pull request.
+The worker and outbox images run concurrency-safe migrations before starting
+their respective services. The outbox publishes only commit-bound, human-approved
+changes and creates a draft pull request.
+
+The user-assigned identity client ID is injected separately from the Entra API
+application ID. Liveness uses `/api/health/live`; readiness uses `/api/health`.
+The release workflow updates the migration job to the scanned release worker
+image and waits for that exact execution to succeed before deploying the worker,
+outbox and web. Windows execution remains subject to the qualification gates
+documented in the runbook even though its scoped permissions are provisioned.
 
 Production policy must deny direct main-branch pushes and require all quality checks plus an independent approver.
 

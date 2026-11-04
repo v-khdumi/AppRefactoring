@@ -128,20 +128,7 @@ jobs:
           done
       - name: Run current release migrations and wait for success
         shell: bash
-        run: |
-          migration="$MIGRATION_JOB_NAME"
-          az containerapp job update --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WORKER_IMAGE" --output none
-          execution="$(az containerapp job start --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --query name --output tsv)"
-          for attempt in {1..100}; do
-            status="$(az containerapp job execution show --name "$migration" --resource-group "$AZURE_RESOURCE_GROUP" --job-execution-name "$execution" --query properties.status --output tsv)"
-            case "$status" in
-              Succeeded) exit 0 ;;
-              Failed|Stopped) echo "Migration execution failed: $status"; exit 1 ;;
-            esac
-            sleep 10
-          done
-          echo "Migration execution did not succeed before the release deadline."
-          exit 1
+        run: bash scripts/deploy-migrations.sh "$AZURE_RESOURCE_GROUP" "$MIGRATION_JOB_NAME" "$WORKER_IMAGE"
       - name: Deploy worker by scanned digest
         run: az containerapp update --name "$SERVICE_WORKER_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$WORKER_IMAGE" --output none
       - name: Deploy outbox

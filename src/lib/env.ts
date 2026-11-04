@@ -12,7 +12,7 @@ const schema = z.object({
   AZURE_SERVICE_BUS_QUEUE: z.string().default("modernization-runs"),
   AZURE_TENANT_ID: z.string().uuid().optional(),
   AZURE_CLIENT_ID: z.string().uuid().optional(),
-  AZURE_MANAGED_IDENTITY_CLIENT_ID:z.string().uuid().optional(),
+  AZURE_MANAGED_IDENTITY_CLIENT_ID: z.string().uuid().optional(),
   AZURE_AI_FOUNDRY_ENDPOINT: optionalUrl,
   AZURE_AI_FOUNDRY_API_KEY: z.string().optional(),
   AZURE_AI_FOUNDRY_MODEL: z.string().default("gpt-6-astra"),
@@ -33,18 +33,23 @@ export function parseEnvironment(values:Record<string,string|undefined>){
 export const env = parseEnvironment(process.env);
 export const demoEnabled = env.DEMO_MODE === "true";
 export function serviceBusNamespaceFromConnectionString(connectionString?:string){return connectionString?.match(/Endpoint=sb:\/\/([^/;]+)/i)?.[1];}
-export function serviceBusNamespace(){return env.AZURE_SERVICE_BUS_NAMESPACE||serviceBusNamespaceFromConnectionString(env.AZURE_SERVICE_BUS_CONNECTION_STRING);}
+export function serviceBusNamespace(configuration = env){return configuration.AZURE_SERVICE_BUS_NAMESPACE;}
 
-export function assertProductionConfiguration() {
-  if (env.NODE_ENV !== "production" || demoEnabled) return;
+export function assertProductionConfiguration(configuration = env) {
+  if (configuration.NODE_ENV !== "production" || configuration.DEMO_MODE === "true") return;
   const required = [
     "DATABASE_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID",
     "AZURE_AI_FOUNDRY_ENDPOINT", "AZURE_AI_FOUNDRY_API_KEY",
     "VERIFICATION_JOB_RESOURCE_ID", "VERIFICATION_PUBLIC_ORIGIN", "HEALTH_CHECK_TOKEN",
   ] as const;
-  const missing = required.filter((key) => !env[key]);
-  const connections=sourceConnections(env.SOURCE_CONNECTIONS);
-  if(!(env.GITHUB_APP_ID&&env.GITHUB_APP_PRIVATE_KEY)&&!connections.length)throw new Error("Configure a GitHub App or administrator-managed SOURCE_CONNECTIONS before serving live traffic.");
-  if(!serviceBusNamespace()&&!env.AZURE_SERVICE_BUS_CONNECTION_STRING)missing.push("AZURE_SERVICE_BUS_NAMESPACE" as typeof missing[number]);
+  const missing: string[] = required.filter((key) => !configuration[key]);
+  const connections=sourceConnections(configuration.SOURCE_CONNECTIONS);
+  const githubConfigured=Boolean(configuration.GITHUB_APP_ID&&configuration.GITHUB_APP_PRIVATE_KEY);
+  if(!githubConfigured&&!connections.length)throw new Error("Configure a GitHub App or administrator-managed SOURCE_CONNECTIONS before serving live traffic.");
+  if(githubConfigured&&!configuration.GITHUB_WEBHOOK_SECRET)missing.push("GITHUB_WEBHOOK_SECRET");
+  if (!configuration.AZURE_SERVICE_BUS_NAMESPACE && !configuration.AZURE_SERVICE_BUS_CONNECTION_STRING) missing.push("AZURE_SERVICE_BUS_NAMESPACE");
   if (missing.length) throw new Error(`Missing production configuration: ${missing.join(", ")}`);
+  if (!configuration.AZURE_AI_FOUNDRY_ENDPOINT?.startsWith("https://") || !configuration.VERIFICATION_PUBLIC_ORIGIN?.startsWith("https://")) {
+    throw new Error("Production Foundry and verification endpoints must use HTTPS.");
+  }
 }

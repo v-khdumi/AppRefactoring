@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
-import { Manrope } from "next/font/google";
+import "@fontsource-variable/manrope";
 import "./globals.css";
 import "./theme.css";
 import "./architecture.css";
 import { AuthProvider } from "@/components/auth-provider";
-
-const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +15,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={manrope.variable}><AuthProvider allowLocalDemo={process.env.DEMO_MODE==="true"}>{children}</AuthProvider></body>
+      <body><AuthProvider allowLocalDemo={process.env.DEMO_MODE==="true"}>{children}</AuthProvider></body>
     </html>
   );
 }

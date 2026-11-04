@@ -1,5 +1,5 @@
 import { ServiceBusClient } from "@azure/service-bus";
-import {managedIdentityCredential} from "./managed-identity";
+import { managedIdentityCredential } from "@/lib/azure-identity";
 import { env, serviceBusNamespace } from "@/lib/env";
 
 let client: ServiceBusClient | undefined;
